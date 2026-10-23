@@ -79,19 +79,23 @@ esac
 `
 
 type fakeTG struct {
-	mu   sync.Mutex
-	sent []map[string]any
+	mu    sync.Mutex
+	sent  []map[string]any
+	edits []map[string]any
 }
 
 func (f *fakeTG) handler(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	var p map[string]any
 	_ = json.Unmarshal(body, &p)
-	if strings.HasSuffix(r.URL.Path, "/sendMessage") {
-		f.mu.Lock()
+	f.mu.Lock()
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/sendMessage"):
 		f.sent = append(f.sent, p)
-		f.mu.Unlock()
+	case strings.HasSuffix(r.URL.Path, "/editMessageText"):
+		f.edits = append(f.edits, p)
 	}
+	f.mu.Unlock()
 	_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 }
 
@@ -194,6 +198,18 @@ func TestFlow(t *testing.T) {
 		t.Fatalf("/read: %q", r)
 	}
 
+	// «Обновить» под экраном перерисовывает то же сообщение, а не шлёт новое.
+	scr := f.last()
+	rfr := scr["reply_markup"].(map[string]any)["inline_keyboard"].([]any)[0].([]any)[0].(map[string]any)
+	if rfr["text"] != "🔄 Обновить" {
+		t.Fatalf("кнопки экрана: %v", scr["reply_markup"])
+	}
+	before := f.count()
+	b.HandleUpdate(ctx, Update{CallbackQuery: &CallbackQuery{ID: "r", From: User{ID: 42}, Message: &Message{MessageID: 77, Chat: Chat{ID: 42}}, Data: rfr["callback_data"].(string)}})
+	if f.count() != before || len(f.edits) != 1 || f.edits[0]["message_id"] != float64(77) || !strings.Contains(f.edits[0]["text"].(string), "&gt; hello") {
+		t.Fatalf("обновление экрана: sent %d→%d, edits %v", before, f.count(), f.edits)
+	}
+
 	// /stop — прерывание.
 	b.HandleUpdate(ctx, msg("/stop"))
 	if c := calls(t, dir); !strings.Contains(c, "terminal send --terminal term-agent --interrupt --json") {
@@ -221,7 +237,7 @@ func TestFlow(t *testing.T) {
 	// Обрыв SSH: ввод не отправляется, пользователю объясняют причину.
 	b.updateChat(42, func(c *chatState) { c.WorktreeID = "repo1::/srv/app/fix-login"; c.Terminal = "" })
 	_ = os.WriteFile(filepath.Join(dir, "verdict"), []byte("unverifiable"), 0o644)
-	before := strings.Count(calls(t, dir), "terminal send")
+	before = strings.Count(calls(t, dir), "terminal send")
 	b.HandleUpdate(ctx, msg("ты тут?"))
 	if r := text(f.last()); !strings.Contains(r, "Связь с хостом «linux-box» потеряна") {
 		t.Fatalf("обрыв SSH: %q", r)

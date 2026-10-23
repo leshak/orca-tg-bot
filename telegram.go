@@ -142,6 +142,27 @@ func (c *tgClient) send(ctx context.Context, chatID int64, html string, kb *Keyb
 	return err
 }
 
+// edit заменяет текст и кнопки уже отправленного сообщения.
+func (c *tgClient) edit(ctx context.Context, chatID, messageID int64, html string, kb *Keyboard) error {
+	params := map[string]any{
+		"chat_id":                  chatID,
+		"message_id":               messageID,
+		"text":                     truncRunes(html, 4096),
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": true,
+	}
+	if kb != nil {
+		params["reply_markup"] = kb
+	}
+	err := c.call(ctx, "editMessageText", params, nil)
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		delete(params, "parse_mode")
+		params["text"] = truncRunes(stripTags(html), 4096)
+		err = c.call(ctx, "editMessageText", params, nil)
+	}
+	return err
+}
+
 func (c *tgClient) answerCallback(ctx context.Context, id, text string) {
 	_ = c.call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": id, "text": text}, nil)
 }

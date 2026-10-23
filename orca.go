@@ -330,12 +330,13 @@ func (o *Orca) Terminals(ctx context.Context, env, worktreeID string) ([]Termina
 	return r.Terminals, err
 }
 
-// Screen возвращает текущий отрисованный экран терминала. На старых хостах,
-// где нет --screen, откатывается на накопленный поток вывода.
-func (o *Orca) Screen(ctx context.Context, env, handle string) ([]string, error) {
+// Screen возвращает текущий отрисованный экран терминала и метаданные строк
+// (мягкие переносы). На старых хостах, где нет --screen, откатывается на накопленный поток вывода.
+func (o *Orca) Screen(ctx context.Context, env, handle string) ([]string, []ScreenRow, error) {
 	var r struct {
 		Terminal struct {
-			Tail []string `json:"tail"`
+			Tail     []string    `json:"tail"`
+			TailRows []ScreenRow `json:"tailRows"`
 		} `json:"terminal"`
 	}
 	err := o.run(ctx, env, &r, "terminal", "read", "--terminal", handle, "--screen")
@@ -343,7 +344,10 @@ func (o *Orca) Screen(ctx context.Context, env, handle string) ([]string, error)
 	if errors.As(err, &oe) && oe.Code == "incompatible_runtime" {
 		err = o.run(ctx, env, &r, "terminal", "read", "--terminal", handle, "--limit", "200")
 	}
-	return r.Terminal.Tail, err
+	if len(r.Terminal.TailRows) != len(r.Terminal.Tail) {
+		r.Terminal.TailRows = nil // метаданные не совпадают со строками — не доверяем им
+	}
+	return r.Terminal.Tail, r.Terminal.TailRows, err
 }
 
 // Send печатает текст в терминал агента и жмёт Enter; ждёт подтверждения отправки до 10 с.

@@ -301,7 +301,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 	chatID := q.Message.Chat.ID
 	kind, key, _ := strings.Cut(q.Data, ":")
 	switch kind {
-	case "sel", "scr", "stp":
+	case "sel", "scr", "stp", "rfr":
 		ref, ok := b.lookupWS(key)
 		if !ok {
 			b.tg.answerCallback(ctx, q.ID, "Кнопка устарела, обновите /ws")
@@ -313,6 +313,10 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 			}
 			c.Env, c.WorktreeID = ref.Env, ref.WorktreeID
 		})
+		if kind == "rfr" {
+			b.refreshScreen(ctx, q)
+			return
+		}
 		b.tg.answerCallback(ctx, q.ID, "")
 		switch kind {
 		case "sel":
@@ -344,7 +348,7 @@ const helpText = `<b>Orca из Telegram</b>
 /cur — что сейчас выбрано
 <i>любой текст</i> — отправить выбранному агенту (Enter нажимается сам)
 /send <i>текст</i> — отправить текст, начинающийся с «/»
-/read [N] — экран терминала агента (последние N строк, по умолчанию 40)
+/read [N] — экран терминала агента (последние N строк, по умолчанию весь экран)
 /stop — прервать агента (Ctrl+C)
 /term — выбрать конкретный терминал в воркспейсе
 /repos — репозитории
@@ -672,6 +676,15 @@ func (b *Bot) wsButtons(ws *Workspace) *Keyboard {
 	}}}
 }
 
+// screenButtons — кнопки под экраном: «Обновить» перерисовывает это же сообщение.
+func (b *Bot) screenButtons(ws *Workspace) *Keyboard {
+	k := b.wsKey(*ws)
+	return &Keyboard{InlineKeyboard: [][]Button{{
+		{Text: "🔄 Обновить", CallbackData: "rfr:" + k},
+		{Text: "⏹ Стоп", CallbackData: "stp:" + k},
+	}}}
+}
+
 func (b *Bot) showCurrent(ctx context.Context, chatID int64) {
 	ws, term, _, err := b.resolve(ctx, chatID)
 	if err != nil {
@@ -716,29 +729,58 @@ func (b *Bot) sendToAgent(ctx context.Context, chatID int64, text string) {
 	b.reply(ctx, chatID, "✉️ Отправлено → <b>"+esc(ws.Name())+"</b>", b.wsButtons(ws))
 }
 
-func (b *Bot) showScreen(ctx context.Context, chatID int64, n int) {
+// screenMessage собирает сообщение с экраном терминала: заголовок, время снимка и <pre>.
+func (b *Bot) screenMessage(ctx context.Context, chatID int64, n int) (string, *Keyboard, error) {
 	ws, term, _, err := b.resolve(ctx, chatID)
+	if err != nil {
+		return "", nil, err
+	}
+	if term == nil {
+		return b.noTermText(ctx, *ws, term), nil, nil
+	}
+	lines, rows, err := b.orca.Screen(ctx, ws.Env, term.Handle)
+	if err != nil {
+		return "", nil, fmt.Errorf("terminal read: %w", err)
+	}
+	body := formatScreen(lines, rows, n, 3500)
+	if body == "" {
+		body = "(пусто)"
+	}
+	head := stateOf(*ws).emoji + " <b>" + esc(ws.Name()) + "</b>"
+	if label := term.Label(); label != "" && label != ws.Name() {
+		head += " · " + esc(truncRunes(label, 40))
+	}
+	head += " · <i>" + time.Now().Format("15:04:05") + "</i>"
+	return head + "\n<pre>" + esc(body) + "</pre>", b.screenButtons(ws), nil
+}
+
+func (b *Bot) showScreen(ctx context.Context, chatID int64, n int) {
+	text, kb, err := b.screenMessage(ctx, chatID, n)
 	if err != nil {
 		b.replyErr(ctx, chatID, "экран", err)
 		return
 	}
-	if term == nil {
-		b.reply(ctx, chatID, b.noTermText(ctx, *ws, term), nil)
-		return
-	}
-	lines, err := b.orca.Screen(ctx, ws.Env, term.Handle)
+	b.reply(ctx, chatID, text, kb)
+}
+
+// refreshScreen перерисовывает сообщение с экраном, на котором нажали «Обновить».
+func (b *Bot) refreshScreen(ctx context.Context, q *CallbackQuery) {
+	chatID := q.Message.Chat.ID
+	text, kb, err := b.screenMessage(ctx, chatID, 0)
 	if err != nil {
-		b.replyErr(ctx, chatID, "terminal read", err)
+		b.tg.answerCallback(ctx, q.ID, truncRunes("Ошибка: "+err.Error(), 190))
 		return
 	}
-	if n <= 0 {
-		n = 40
+	if err := b.tg.edit(ctx, chatID, q.Message.MessageID, text, kb); err != nil {
+		if strings.Contains(err.Error(), "message is not modified") {
+			b.tg.answerCallback(ctx, q.ID, "Без изменений")
+			return
+		}
+		// Сообщение слишком старое или удалено — шлём новое.
+		log.Printf("editMessageText: %v", err)
+		b.reply(ctx, chatID, text, kb)
 	}
-	body := tailText(lines, n, 3500)
-	if body == "" {
-		body = "(пусто)"
-	}
-	b.reply(ctx, chatID, "🖥 <b>"+esc(ws.Name())+"</b> · "+esc(term.Label())+"\n<pre>"+esc(body)+"</pre>", b.wsButtons(ws))
+	b.tg.answerCallback(ctx, q.ID, "Обновлено")
 }
 
 func (b *Bot) interrupt(ctx context.Context, chatID int64) {
@@ -1071,25 +1113,6 @@ func truncRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n-1]) + "…"
-}
-
-// tailText берёт последние n непустых в конце строк и ограничивает результат maxRunes символами с конца.
-func tailText(lines []string, n, maxRunes int) string {
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
-	}
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	out := make([]string, len(lines))
-	for i, l := range lines {
-		out[i] = strings.TrimRight(l, " \t")
-	}
-	s := strings.Join(out, "\n")
-	if r := []rune(s); len(r) > maxRunes {
-		s = "…" + string(r[len(r)-maxRunes:])
-	}
-	return s
 }
 
 func stripTags(s string) string {
