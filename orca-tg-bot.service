@@ -1,0 +1,27 @@
+# Пользовательский unit: бот должен работать от того же пользователя, что и Orca,
+# иначе CLI не найдёт метаданные запущенного рантайма.
+#
+# Установка:
+#   mkdir -p ~/.config/systemd/user ~/.config/orca-tg-bot ~/.local/state
+#   cp orca-tg-bot.service ~/.config/systemd/user/
+#   cp .env.example ~/.config/orca-tg-bot/env && chmod 600 ~/.config/orca-tg-bot/env   # заполнить
+#   install -m 755 orca-tg-bot ~/.local/bin/
+#   loginctl enable-linger "$USER"     # чтобы сервис жил без открытой сессии
+#   systemctl --user daemon-reload && systemctl --user enable --now orca-tg-bot
+#   journalctl --user -u orca-tg-bot -f
+
+[Unit]
+Description=Telegram-бот для Orca
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/orca-tg-bot/env
+# orca-ide обычно ставится в /usr/bin или ~/.local/bin
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/orca-tg-bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

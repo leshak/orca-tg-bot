@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent для macOS: бот работает от вашего пользователя, рядом с запущенным Orca.
+
+  Установка:
+    go build -o orca-tg-bot . && install -m 755 orca-tg-bot ~/.local/bin/
+    which orca                       # подставьте этот путь в ORCA_BIN ниже
+    cp dev.orca-tg-bot.plist ~/Library/LaunchAgents/
+    chmod 600 ~/Library/LaunchAgents/dev.orca-tg-bot.plist    # внутри токен
+    # замените USER, токен и id ниже
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.orca-tg-bot.plist
+    tail -f ~/Library/Logs/orca-tg-bot.log
+
+  Перезапуск после правок:
+    launchctl bootout gui/$(id -u)/dev.orca-tg-bot
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.orca-tg-bot.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.orca-tg-bot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USER/.local/bin/orca-tg-bot</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TELEGRAM_BOT_TOKEN</key>
+    <string>123456789:AA...</string>
+    <key>TELEGRAM_ALLOWED_IDS</key>
+    <string>123456789</string>
+    <key>ORCA_BIN</key>
+    <string>/usr/local/bin/orca</string>
+    <key>DEFAULT_AGENT</key>
+    <string>claude</string>
+    <key>STATE_FILE</key>
+    <string>/Users/USER/Library/Application Support/orca-tg-bot.json</string>
+    <!-- Агенты (claude и др.) запускает сама Orca, но PATH пригодится CLI -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- <key>TELEGRAM_PROXY</key><string>socks5://127.0.0.1:1080</string> -->
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/USER/Library/Logs/orca-tg-bot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/USER/Library/Logs/orca-tg-bot.log</string>
+</dict>
+</plist>
