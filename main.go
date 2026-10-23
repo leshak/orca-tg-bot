@@ -53,7 +53,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("ORCA_TIMEOUT: %v", err)
 	}
-	orca := &Orca{bin: env("ORCA_BIN", defBin), env: env("ORCA_ENVIRONMENT", ""), timeout: orcaTimeout}
+	orca := &Orca{bin: env("ORCA_BIN", defBin), timeout: orcaTimeout, targets: parseTargets(env("ORCA_ENVIRONMENT", "auto"))}
 
 	poll, err := time.ParseDuration(env("POLL_INTERVAL", "5s"))
 	if err != nil || poll < time.Second {
@@ -88,7 +88,15 @@ func main() {
 
 	go bot.Watch(ctx, poll)
 
-	log.Printf("запущен: orca=%s environment=%q, пользователей в allowlist: %d", orca.bin, orca.env, len(allowed))
+	var names []string
+	for _, t := range orca.Targets(ctx) {
+		if t.Env == "" {
+			names = append(names, "local")
+		} else {
+			names = append(names, t.Name)
+		}
+	}
+	log.Printf("запущен: orca=%s, рантаймы: %s, пользователей в allowlist: %d", orca.bin, strings.Join(names, ", "), len(allowed))
 	var offset int64
 	for ctx.Err() == nil {
 		ups, err := tg.getUpdates(ctx, offset)
@@ -107,4 +115,27 @@ func main() {
 		}
 	}
 	log.Print("остановлен")
+}
+
+// parseTargets разбирает ORCA_ENVIRONMENT: "auto" (по умолчанию) — эта машина и все
+// сопряжённые серверы Orca; иначе список через запятую, где "local" — локальный рантайм.
+func parseTargets(v string) []Target {
+	if strings.EqualFold(v, "auto") {
+		return nil
+	}
+	var out []Target
+	for _, s := range strings.Split(v, ",") {
+		s = strings.TrimSpace(s)
+		switch {
+		case s == "":
+		case strings.EqualFold(s, "local"):
+			out = append(out, Target{})
+		default:
+			out = append(out, Target{Env: s, Name: s})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

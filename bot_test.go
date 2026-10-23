@@ -19,14 +19,32 @@ import (
 
 const fakeOrca = `#!/bin/sh
 echo "$@" >> "$FAKE_DIR/calls.log"
+remote=""
+case "$*" in *"--environment env-1"*) remote=1 ;; esac
+if [ -n "$remote" ] && [ -f "$FAKE_DIR/remote_down" ]; then
+  echo '{"id":"r","ok":false,"error":{"code":"runtime_unavailable","message":"server unreachable"}}'
+  exit 1
+fi
 case "$1 $2" in
+"environment list")
+  echo '{"id":"e","ok":true,"result":{"environments":[{"id":"env-1","name":"devbox"}]},"_meta":{"runtimeId":"local"}}'
+  ;;
 "worktree ps")
+  if [ -n "$remote" ]; then
+    rst=$(cat "$FAKE_DIR/remote_status" 2>/dev/null || echo working)
+    echo '{"id":"1r","ok":true,"result":{"worktrees":[{"worktreeId":"repo9::/home/u/geo","repoId":"repo9","repo":"geo","path":"/home/u/geo","branch":"","displayName":"geo","status":"'$rst'","hostId":"local","isArchived":false,"lastActivityAt":0,"agents":[{"paneKey":"tR:lR","parentPaneKey":null,"state":"working","agentType":"claude","lastAssistantMessage":"Геокодер готов","updatedAt":1}]}],"totalCount":1,"truncated":false},"_meta":{"runtimeId":"rr"}}'
+    exit 0
+  fi
   st=$(cat "$FAKE_DIR/status")
   cat <<EOF
 {"id":"1","ok":true,"result":{"worktrees":[{"worktreeId":"repo1::/srv/app/fix-login","repoId":"repo1","repo":"app","path":"/srv/app/fix-login","branch":"fix-login","displayName":"fix-login","workspaceStatus":"in-progress","comment":"чиню логин","unread":false,"isArchived":false,"status":"$st","hostId":"ssh:tgt-1","liveTerminalCount":1,"lastActivityAt":1,"agents":[{"paneKey":"tab1:leaf1","parentPaneKey":null,"state":"working","agentType":"claude","prompt":"fix","displayName":null,"lastAssistantMessage":"Готово: тесты <зелёные> & PR открыт","toolName":"Bash","interrupted":false,"updatedAt":1}]}],"totalCount":1,"truncated":false},"_meta":{"runtimeId":"r"}}
 EOF
   ;;
 "terminal list")
+  if [ -n "$remote" ]; then
+    echo '{"id":"2r","ok":true,"result":{"terminals":[{"handle":"term-remote","worktreeId":"repo9::/home/u/geo","tabId":"tR","leafId":"lR","title":"claude","connected":true,"writable":true,"agentIdentity":"claude"}]},"_meta":{"runtimeId":"rr"}}'
+    exit 0
+  fi
   v=$(cat "$FAKE_DIR/verdict" 2>/dev/null || echo live)
   echo '{"id":"2","ok":true,"result":{"terminals":[{"handle":"term-shell","worktreeId":"repo1::/srv/app/fix-login","tabId":"tab0","leafId":"leaf0","title":"zsh","connected":true,"writable":true,"verdict":"'$v'"},{"handle":"term-agent","worktreeId":"repo1::/srv/app/fix-login","tabId":"tab1","leafId":"leaf1","title":"claude","connected":true,"writable":true,"agentIdentity":"claude","verdict":"'$v'"}],"totalCount":2,"truncated":false},"_meta":{"runtimeId":"r"}}'
   ;;
@@ -40,9 +58,17 @@ EOF
   echo '{"id":"4","ok":true,"result":{"accepted":true},"_meta":{"runtimeId":"r"}}'
   ;;
 "repo list")
+  if [ -n "$remote" ]; then
+    echo '{"id":"5r","ok":true,"result":{"repos":[{"id":"repo9","path":"/home/u/geo","displayName":"geo"},{"id":"repoA","path":"/home/u/app","displayName":"app"}]},"_meta":{"runtimeId":"rr"}}'
+    exit 0
+  fi
   echo '{"id":"5","ok":true,"result":{"repos":[{"id":"repo1","path":"/srv/app","displayName":"app"}]},"_meta":{"runtimeId":"r"}}'
   ;;
 "worktree create")
+  if [ -n "$remote" ]; then
+    echo '{"id":"6r","ok":true,"result":{"worktree":{"id":"repoA::/home/u/app/x"}},"_meta":{"runtimeId":"rr"}}'
+    exit 0
+  fi
   echo '{"id":"6","ok":true,"result":{"worktree":{"id":"repo1::/srv/app/new-feat"}},"_meta":{"runtimeId":"r"}}'
   ;;
 "agent launch")
@@ -135,7 +161,7 @@ func TestFlow(t *testing.T) {
 	// /ws — список и кнопка выбора.
 	b.HandleUpdate(ctx, msg("/ws"))
 	ws := f.last()
-	if !strings.Contains(text(ws), "fix-login") || !strings.Contains(text(ws), "работает (Bash)") || !strings.Contains(text(ws), "🖧 linux-box") {
+	if !strings.Contains(text(ws), "fix-login") || !strings.Contains(text(ws), "<i>работает · Bash</i>") || !strings.Contains(text(ws), "<b>🌐 linux-box</b>") {
 		t.Fatalf("список воркспейсов: %q", text(ws))
 	}
 	kb := ws["reply_markup"].(map[string]any)["inline_keyboard"].([]any)
@@ -183,8 +209,8 @@ func TestFlow(t *testing.T) {
 		t.Fatalf("agent launch:\n%s", c)
 	}
 
-	// /new — поиск репо по имени, задача целиком.
-	b.HandleUpdate(ctx, msg("/new app new-feat добавь экспорт в CSV"))
+	// /new — поиск репо по имени (с указанием сервера), задача целиком.
+	b.HandleUpdate(ctx, msg("/new local/app new-feat добавь экспорт в CSV"))
 	if c := calls(t, dir); !strings.Contains(c, "worktree create --repo id:repo1 --name new-feat --agent claude --surface terminal --no-parent --prompt добавь экспорт в CSV --json") {
 		t.Fatalf("worktree create:\n%s", c)
 	}
@@ -237,5 +263,89 @@ func TestWatchNotifies(t *testing.T) {
 	time.Sleep(700 * time.Millisecond)
 	if f.count() != before {
 		t.Fatalf("пришло уведомление при выключенных: %q", text(f.last()))
+	}
+}
+
+// Сопряжённый сервер Orca (environment): его воркспейсы видны вместе с локальными,
+// а все команды к ним уходят с --environment.
+func TestRemoteEnvironment(t *testing.T) {
+	b, f, dir := setup(t)
+	ctx := context.Background()
+
+	b.HandleUpdate(ctx, msg("/ws"))
+	ws := f.last()
+	if !strings.Contains(text(ws), "fix-login") || !strings.Contains(text(ws), "<b>geo</b>") || !strings.Contains(text(ws), "<b>🌐 devbox</b>") {
+		t.Fatalf("список воркспейсов: %q", text(ws))
+	}
+	var data string
+	for _, row := range ws["reply_markup"].(map[string]any)["inline_keyboard"].([]any) {
+		for _, btn := range row.([]any) {
+			if m := btn.(map[string]any); strings.Contains(m["text"].(string), "geo") {
+				data = m["callback_data"].(string)
+			}
+		}
+	}
+	if data == "" {
+		t.Fatal("нет кнопки удалённого воркспейса")
+	}
+	b.HandleUpdate(ctx, Update{CallbackQuery: &CallbackQuery{ID: "q", From: User{ID: 42}, Message: &Message{Chat: Chat{ID: 42}}, Data: data}})
+	if cur := text(f.last()); !strings.Contains(cur, "Геокодер готов") || !strings.Contains(cur, "🌐 devbox") {
+		t.Fatalf("/cur: %q", cur)
+	}
+	if st := b.chat(42); st.Env != "env-1" || st.WorktreeID != "repo9::/home/u/geo" {
+		t.Fatalf("выбор: %+v", st)
+	}
+
+	b.HandleUpdate(ctx, msg("пример URL"))
+	b.HandleUpdate(ctx, msg("/read"))
+	b.HandleUpdate(ctx, msg("/stop"))
+	c := calls(t, dir)
+	for _, want := range []string{
+		"terminal list --worktree id:repo9::/home/u/geo --json --environment env-1",
+		"terminal send --terminal term-remote --text пример URL --enter --wait-submit 10 --json --environment env-1",
+		"terminal read --terminal term-remote --screen --json --environment env-1",
+		"terminal send --terminal term-remote --interrupt --json --environment env-1",
+	} {
+		if !strings.Contains(c, want) {
+			t.Fatalf("нет вызова %q:\n%s", want, c)
+		}
+	}
+
+	// /new: «app» есть и тут, и на сервере — нужно уточнение; «devbox/app» — создаётся на сервере.
+	b.HandleUpdate(ctx, msg("/new app x"))
+	if r := text(f.last()); !strings.Contains(r, "нескольким") {
+		t.Fatalf("неоднозначное /new: %q", r)
+	}
+	b.HandleUpdate(ctx, msg("/new devbox/app x задача"))
+	if c := calls(t, dir); !strings.Contains(c, "worktree create --repo id:repoA --name x --agent claude --surface terminal --no-parent --prompt задача --json --environment env-1") {
+		t.Fatalf("worktree create на сервере:\n%s", c)
+	}
+	if st := b.chat(42); st.Env != "env-1" || st.WorktreeID != "repoA::/home/u/app/x" {
+		t.Fatalf("после /new: %+v", st)
+	}
+
+	// Сервер недоступен: локальные воркспейсы всё равно показываются.
+	_ = os.WriteFile(filepath.Join(dir, "remote_down"), nil, 0o644)
+	b.HandleUpdate(ctx, msg("/ws"))
+	if r := text(f.last()); !strings.Contains(r, "🌐 devbox</b>\n<blockquote>🔌 не отвечает") || !strings.Contains(r, "fix-login") {
+		t.Fatalf("/ws при недоступном сервере: %q", r)
+	}
+}
+
+// Уведомление о завершении агента на сопряжённом сервере.
+func TestWatchRemote(t *testing.T) {
+	b, f, dir := setup(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Watch(ctx, 200*time.Millisecond)
+
+	time.Sleep(500 * time.Millisecond)
+	_ = os.WriteFile(filepath.Join(dir, "remote_status"), []byte("done"), 0o644)
+	deadline := time.Now().Add(3 * time.Second)
+	for f.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if n := text(f.last()); !strings.Contains(n, "<b>geo</b>: агент закончил") || !strings.Contains(n, "🌐 devbox") {
+		t.Fatalf("уведомление: %q", n)
 	}
 }

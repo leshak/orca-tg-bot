@@ -19,10 +19,14 @@ import (
 
 // chatState — что выбрано в конкретном чате. Сохраняется в файл, чтобы пережить перезапуск.
 type chatState struct {
+	Env        string `json:"env,omitempty"` // рантайм Orca выбранного воркспейса; "" — локальный
 	WorktreeID string `json:"worktreeId"`
 	Terminal   string `json:"terminal"` // handle; пусто — терминал агента выбирается автоматически
 	Muted      bool   `json:"muted"`    // уведомления выключены
 }
+
+// wsRef — воркспейс в конкретном рантайме Orca.
+type wsRef struct{ Env, WorktreeID string }
 
 type Bot struct {
 	tg        *tgClient
@@ -33,10 +37,11 @@ type Bot struct {
 
 	mu    sync.Mutex
 	chats map[int64]*chatState
-	ids   map[string]string // короткий id -> worktreeId (callback_data ограничен 64 байтами)
+	ids   map[string]wsRef  // короткий id -> воркспейс (callback_data ограничен 64 байтами)
 	terms map[string]string // короткий id -> handle терминала
 
 	hostNames   map[string]string // hostId ("ssh:…") -> имя SSH-цели из `host list`
+	machineName string            // имя этой машины из `host list`
 	hostsLoaded time.Time
 }
 
@@ -52,7 +57,11 @@ func (b *Bot) hostLabel(ctx context.Context, hostID string) string {
 	if stale {
 		if hosts, err := b.orca.Hosts(ctx); err == nil {
 			names := map[string]string{}
+			machine := ""
 			for _, h := range hosts {
+				if h.Kind == "local" && h.MachineName != "" {
+					machine = strings.ReplaceAll(h.MachineName, "\u00a0", " ")
+				}
 				if h.Name == "" {
 					continue
 				}
@@ -66,7 +75,7 @@ func (b *Bot) hostLabel(ctx context.Context, hostID string) string {
 				}
 			}
 			b.mu.Lock()
-			b.hostNames, b.hostsLoaded = names, time.Now()
+			b.hostNames, b.machineName, b.hostsLoaded = names, machine, time.Now()
 			b.mu.Unlock()
 		} else {
 			// Не дёргаем CLI на каждое сообщение, если host list недоступен.
@@ -87,17 +96,33 @@ func (b *Bot) hostLabel(ctx context.Context, hostID string) string {
 
 // whereText — «repo · branch» плюс хост для SSH/удалённых воркtree.
 func (b *Bot) whereText(ctx context.Context, w Workspace) string {
-	s := esc(w.Repo) + " · <code>" + esc(w.Branch) + "</code>"
-	if h := b.hostLabel(ctx, w.HostID); h != "" {
-		s += " · 🖧 " + esc(h)
+	s := esc(w.Repo)
+	if br := w.ShortBranch(); br != "" {
+		s += " · <code>" + esc(br) + "</code>"
+	}
+	if h := b.wsHost(ctx, w); h != "" {
+		s += " · 🌐 " + esc(h)
 	}
 	return s
+}
+
+// wsHost — где живёт воркспейс: имя сервера Orca и/или SSH-цели; "" для этой машины.
+func (b *Bot) wsHost(ctx context.Context, w Workspace) string {
+	if w.Env != "" {
+		// SSH-цели удалённого рантайма по имени не разрешаем: показываем id.
+		if w.HostID != "" && w.HostID != "local" {
+			_, rest, _ := strings.Cut(w.HostID, ":")
+			return w.EnvName + "/" + rest
+		}
+		return w.EnvName
+	}
+	return b.hostLabel(ctx, w.HostID)
 }
 
 // noTermText объясняет, почему писать некуда: нет терминалов или потеряна связь с хостом.
 func (b *Bot) noTermText(ctx context.Context, w Workspace, term *Terminal) string {
 	if w.UnverifiableTerminalCount > 0 || (term != nil && term.Verdict == "unverifiable") {
-		h := b.hostLabel(ctx, w.HostID)
+		h := b.wsHost(ctx, w)
 		if h == "" {
 			h = "хостом"
 		} else {
@@ -111,7 +136,7 @@ func (b *Bot) noTermText(ctx context.Context, w Workspace, term *Terminal) strin
 func NewBot(tg *tgClient, orca *Orca, allowed map[int64]bool, agent, stateFile string) *Bot {
 	b := &Bot{
 		tg: tg, orca: orca, allowed: allowed, agent: agent, stateFile: stateFile,
-		chats: map[int64]*chatState{}, ids: map[string]string{}, terms: map[string]string{},
+		chats: map[int64]*chatState{}, ids: map[string]wsRef{}, terms: map[string]string{},
 	}
 	b.loadState()
 	return b
@@ -172,10 +197,10 @@ func shortID(s string) string {
 	return hex.EncodeToString(h[:5])
 }
 
-func (b *Bot) wsKey(worktreeID string) string {
-	k := shortID(worktreeID)
+func (b *Bot) wsKey(w Workspace) string {
+	k := shortID(w.Key())
 	b.mu.Lock()
-	b.ids[k] = worktreeID
+	b.ids[k] = wsRef{Env: w.Env, WorktreeID: w.WorktreeID}
 	b.mu.Unlock()
 	return k
 }
@@ -186,6 +211,13 @@ func (b *Bot) termKey(handle string) string {
 	b.terms[k] = handle
 	b.mu.Unlock()
 	return k
+}
+
+func (b *Bot) lookupWS(k string) (wsRef, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v, ok := b.ids[k]
+	return v, ok
 }
 
 func (b *Bot) lookup(m map[string]string, k string) (string, bool) {
@@ -270,16 +302,16 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 	kind, key, _ := strings.Cut(q.Data, ":")
 	switch kind {
 	case "sel", "scr", "stp":
-		wtID, ok := b.lookup(b.ids, key)
+		ref, ok := b.lookupWS(key)
 		if !ok {
 			b.tg.answerCallback(ctx, q.ID, "Кнопка устарела, обновите /ws")
 			return
 		}
 		b.updateChat(chatID, func(c *chatState) {
-			if c.WorktreeID != wtID {
+			if c.WorktreeID != ref.WorktreeID || c.Env != ref.Env {
 				c.Terminal = ""
 			}
-			c.WorktreeID = wtID
+			c.Env, c.WorktreeID = ref.Env, ref.WorktreeID
 		})
 		b.tg.answerCallback(ctx, q.ID, "")
 		switch kind {
@@ -330,22 +362,6 @@ func (b *Bot) replyErr(ctx context.Context, chatID int64, what string, err error
 	b.reply(ctx, chatID, "❌ "+esc(what)+": <code>"+esc(truncRunes(err.Error(), 800))+"</code>", nil)
 }
 
-var statusOrder = map[string]int{"permission": 0, "working": 1, "done": 2, "active": 3, "inactive": 4}
-
-func statusEmoji(s string) string {
-	switch s {
-	case "working":
-		return "⏳"
-	case "permission":
-		return "⚠️"
-	case "done":
-		return "✅"
-	case "active":
-		return "🟢"
-	}
-	return "⚪"
-}
-
 func agentStateRu(s string) string {
 	switch s {
 	case "working":
@@ -360,75 +376,253 @@ func agentStateRu(s string) string {
 	return s
 }
 
+// wsGroup — машина в списке /ws: эта машина, её SSH-цель или сервер Orca.
+type wsGroup struct {
+	key, title string
+	order      int // 0 — эта машина, 1 — её SSH-цели, 2 — серверы Orca
+	items      []Workspace
+	err        error // сервер не ответил
+}
+
+func (b *Bot) groupOf(ctx context.Context, w Workspace) (key, title string, order int) {
+	switch {
+	case w.Env != "":
+		return "env:" + w.Env + "|" + w.HostID, "🌐 " + esc(b.wsHost(ctx, w)), 2
+	case w.HostID == "" || w.HostID == "local":
+		name := "Эта машина"
+		b.mu.Lock()
+		if b.machineName != "" {
+			name = b.machineName
+		}
+		b.mu.Unlock()
+		return "local", "💻 " + esc(name), 0
+	}
+	return w.HostID, "🌐 " + esc(b.hostLabel(ctx, w.HostID)), 1
+}
+
+// wsState — состояние воркспейса для человека. Опирается прежде всего на агента:
+// статус воркспейса «active» значит лишь «открыт терминал», а агент там может ждать ответа.
+type wsState struct {
+	rank  int    // порядок в списке: что требует внимания — выше
+	emoji string // значок
+	label string // для сводки: «1 работает»
+}
+
+var (
+	stPermission = wsState{0, "⚠️", "ждут разрешения"}
+	stWorking    = wsState{1, "⏳", "в работе"}
+	stReady      = wsState{2, "✅", "ждут ответа"}
+	stOpen       = wsState{3, "🟢", "открыты"}
+	stIdle       = wsState{4, "💤", "спят"}
+)
+
+func stateOf(w Workspace) wsState {
+	a := w.MainAgent()
+	switch {
+	case w.Status == "permission" || (a != nil && a.State == "blocked"):
+		return stPermission
+	case w.Status == "working" || (a != nil && a.State == "working"):
+		return stWorking
+	case w.Status == "done" || (a != nil && (a.State == "done" || a.State == "waiting")):
+		return stReady
+	case w.Status == "active":
+		return stOpen
+	}
+	return stIdle
+}
+
+// ago — «5 мин назад» по времени в миллисекундах.
+func ago(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	d := time.Since(time.UnixMilli(ms))
+	switch {
+	case d < time.Minute:
+		return "только что"
+	case d < time.Hour:
+		return fmt.Sprintf("%d мин назад", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d ч назад", int(d.Hours()))
+	}
+	return fmt.Sprintf("%d дн назад", int(d.Hours()/24))
+}
+
+// agentLine — строка под воркспейсом: что делает агент. "" если агента нет.
+func (b *Bot) agentLine(w Workspace) string {
+	a := w.MainAgent()
+	if a == nil {
+		return ""
+	}
+	var parts []string
+	// Тип агента пишем, только если он не тот, что по умолчанию: иначе это шум.
+	if a.AgentType != nil && *a.AgentType != "" && *a.AgentType != b.agent {
+		parts = append(parts, esc(*a.AgentType))
+	}
+	parts = append(parts, agentStateRu(a.State))
+	if (a.State == "working" || a.State == "blocked") && a.ToolName != nil && *a.ToolName != "" {
+		parts = append(parts, esc(*a.ToolName))
+	} else if t := ago(a.UpdatedAt); t != "" && a.State != "working" {
+		parts = append(parts, t)
+	}
+	if extra := len(w.Agents) - 1; extra > 0 {
+		parts = append(parts, fmt.Sprintf("+%d агент.", extra))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// subIndent — отступ под имя воркспейса: em-space + en-space ≈ ширина значка с пробелом.
+const subIndent = "  "
+
 func (b *Bot) listWorkspaces(ctx context.Context, chatID int64) {
-	all, err := b.orca.PS(ctx)
-	if err != nil {
-		b.replyErr(ctx, chatID, "worktree ps", err)
+	all, failed := b.orca.PSAll(ctx)
+	if len(all) == 0 && len(failed) > 0 && failed[0].Target.Env == "" {
+		b.replyErr(ctx, chatID, "worktree ps", failed[0].Err)
 		return
 	}
-	var list []Workspace
-	for _, w := range all {
-		if !w.IsArchived {
-			list = append(list, w)
+	b.hostLabel(ctx, "ssh:") // подгрузить имена машин из `host list`
+
+	groups := map[string]*wsGroup{}
+	var order []*wsGroup
+	add := func(key, title string, ord int) *wsGroup {
+		if g := groups[key]; g != nil {
+			return g
 		}
+		g := &wsGroup{key: key, title: title, order: ord}
+		groups[key] = g
+		order = append(order, g)
+		return g
 	}
-	if len(list) == 0 {
+	counts := map[wsState]int{}
+	total := 0
+	for _, w := range all {
+		if w.IsArchived {
+			continue
+		}
+		total++
+		counts[stateOf(w)]++
+		k, t, o := b.groupOf(ctx, w)
+		g := add(k, t, o)
+		g.items = append(g.items, w)
+	}
+	for _, f := range failed {
+		add("env:"+f.Target.Env+"|err", "🌐 "+esc(f.Target.Name), 2).err = f.Err
+	}
+	if total == 0 && len(failed) == 0 {
 		b.reply(ctx, chatID, "Воркспейсов нет. Создать: /new", nil)
 		return
 	}
-	sort.SliceStable(list, func(i, j int) bool {
-		oi, oj := statusOrder[list[i].Status], statusOrder[list[j].Status]
-		if oi != oj {
-			return oi < oj
+	sort.SliceStable(order, func(i, j int) bool {
+		if order[i].order != order[j].order {
+			return order[i].order < order[j].order
 		}
-		return list[i].LastActivityAt > list[j].LastActivityAt
+		return order[i].title < order[j].title
 	})
-	const maxItems = 25
-	cur := b.chat(chatID).WorktreeID
+
+	st := b.chat(chatID)
+	cur := wsRefKey(st.Env, st.WorktreeID)
 
 	var sb strings.Builder
-	var rows [][]Button
-	var row []Button
-	for i, w := range list {
-		if i == maxItems {
-			fmt.Fprintf(&sb, "\n…и ещё %d", len(list)-maxItems)
-			break
-		}
-		mark := ""
-		if w.WorktreeID == cur {
-			mark = "👉 "
-		}
-		fmt.Fprintf(&sb, "%s%s <b>%s</b> — %s\n", mark, statusEmoji(w.Status), esc(w.Name()), b.whereText(ctx, w))
-		if w.UnverifiableTerminalCount > 0 {
-			sb.WriteString("    🔌 нет связи с хостом\n")
-		}
-		if w.Comment != "" {
-			fmt.Fprintf(&sb, "    💬 %s\n", esc(truncRunes(w.Comment, 120)))
-		}
-		if a := w.MainAgent(); a != nil {
-			agent := "агент"
-			if a.AgentType != nil && *a.AgentType != "" {
-				agent = *a.AgentType
-			}
-			line := fmt.Sprintf("    🤖 %s: %s", esc(agent), agentStateRu(a.State))
-			if a.State == "working" && a.ToolName != nil && *a.ToolName != "" {
-				line += " (" + esc(*a.ToolName) + ")"
-			}
-			if extra := len(w.Agents) - 1; extra > 0 {
-				line += fmt.Sprintf(" +%d", extra)
-			}
-			sb.WriteString(line + "\n")
-		}
-		row = append(row, Button{Text: statusEmoji(w.Status) + " " + truncRunes(w.Name(), 28), CallbackData: "sel:" + b.wsKey(w.WorktreeID)})
-		if len(row) == 2 {
-			rows = append(rows, row)
-			row = nil
+	// Сводка: сначала то, что требует внимания.
+	sb.WriteString("<b>Воркспейсы</b>\n")
+	var summary []string
+	for _, s := range []wsState{stPermission, stWorking, stReady, stOpen, stIdle} {
+		if n := counts[s]; n > 0 {
+			summary = append(summary, fmt.Sprintf("%s %d %s", s.emoji, n, s.label))
 		}
 	}
-	if len(row) > 0 {
-		rows = append(rows, row)
+	sb.WriteString(strings.Join(summary, " · ") + "\n")
+
+	const maxItems = 30
+	shown := 0
+	var buttons []Button
+	for _, g := range order {
+		sb.WriteString("\n<b>" + g.title + "</b>\n")
+		var lines []string
+		if g.err != nil {
+			lines = append(lines, "🔌 не отвечает", subIndent+"<i>"+esc(truncRunes(g.err.Error(), 120))+"</i>")
+		}
+		sort.SliceStable(g.items, func(i, j int) bool {
+			ri, rj := stateOf(g.items[i]).rank, stateOf(g.items[j]).rank
+			if ri != rj {
+				return ri < rj
+			}
+			return g.items[i].LastActivityAt > g.items[j].LastActivityAt
+		})
+		var idle []Workspace
+		for _, w := range g.items {
+			s := stateOf(w)
+			if s == stIdle && w.Key() != cur {
+				idle = append(idle, w)
+				continue
+			}
+			if shown == maxItems {
+				continue
+			}
+			shown++
+			line := s.emoji + " <b>" + esc(w.Name()) + "</b>"
+			if br := w.ShortBranch(); br != "" && br != w.Name() && !(w.IsMainWorktree && (br == "main" || br == "master")) {
+				line += " <code>" + esc(br) + "</code>"
+			}
+			if w.Key() == cur {
+				line += " 👈"
+			}
+			lines = append(lines, line)
+			if al := b.agentLine(w); al != "" {
+				lines = append(lines, subIndent+"<i>"+al+"</i>")
+			}
+			if w.UnverifiableTerminalCount > 0 {
+				lines = append(lines, subIndent+"🔌 <i>нет связи с хостом</i>")
+			}
+			if w.Comment != "" {
+				lines = append(lines, subIndent+"💬 <i>"+esc(truncRunes(w.Comment, 100))+"</i>")
+			}
+			buttons = append(buttons, b.wsButton(w, cur))
+		}
+		if len(idle) > 0 {
+			names := make([]string, len(idle))
+			for i, w := range idle {
+				names[i] = esc(w.Name())
+				buttons = append(buttons, b.wsButton(w, cur))
+			}
+			lines = append(lines, stIdle.emoji+" "+strings.Join(names, " · "))
+		}
+		if len(lines) == 0 {
+			lines = append(lines, "<i>пусто</i>")
+		}
+		sb.WriteString("<blockquote>" + strings.Join(lines, "\n") + "</blockquote>")
+	}
+	if total > shown+countIdle(all, cur) {
+		fmt.Fprintf(&sb, "\n…показаны не все: %d из %d", shown, total)
+	}
+
+	var rows [][]Button
+	for i := 0; i < len(buttons); i += 2 {
+		rows = append(rows, buttons[i:min(i+2, len(buttons))])
 	}
 	b.reply(ctx, chatID, sb.String(), &Keyboard{InlineKeyboard: rows})
+}
+
+func countIdle(all []Workspace, cur string) int {
+	n := 0
+	for _, w := range all {
+		if !w.IsArchived && stateOf(w) == stIdle && w.Key() != cur {
+			n++
+		}
+	}
+	return n
+}
+
+// wsButton — кнопка выбора воркспейса; у удалённых — имя машины, чтобы не путать одноимённые.
+func (b *Bot) wsButton(w Workspace, cur string) Button {
+	text := stateOf(w).emoji + " " + truncRunes(w.Name(), 24)
+	if w.Env != "" {
+		text += " · " + truncRunes(w.EnvName, 10)
+	}
+	if w.Key() == cur {
+		text = "👉 " + text
+	}
+	return Button{Text: text, CallbackData: "sel:" + b.wsKey(w)}
 }
 
 // resolve находит выбранный воркспейс и терминал, в который надо писать.
@@ -437,8 +631,11 @@ func (b *Bot) resolve(ctx context.Context, chatID int64) (*Workspace, *Terminal,
 	if st.WorktreeID == "" {
 		return nil, nil, nil, fmt.Errorf("воркспейс не выбран — откройте /ws")
 	}
-	all, err := b.orca.PS(ctx)
+	all, err := b.orca.PS(ctx, st.Env)
 	if err != nil {
+		if st.Env != "" {
+			return nil, nil, nil, fmt.Errorf("сервер Orca «%s» не отвечает: %w", b.orca.TargetName(ctx, st.Env), err)
+		}
 		return nil, nil, nil, err
 	}
 	var ws *Workspace
@@ -451,7 +648,7 @@ func (b *Bot) resolve(ctx context.Context, chatID int64) (*Workspace, *Terminal,
 	if ws == nil {
 		return nil, nil, nil, fmt.Errorf("выбранный воркспейс больше не найден — откройте /ws")
 	}
-	terms, err := b.orca.Terminals(ctx, ws.WorktreeID)
+	terms, err := b.orca.Terminals(ctx, ws.Env, ws.WorktreeID)
 	if err != nil {
 		return ws, nil, nil, err
 	}
@@ -468,7 +665,7 @@ func (b *Bot) resolve(ctx context.Context, chatID int64) (*Workspace, *Terminal,
 }
 
 func (b *Bot) wsButtons(ws *Workspace) *Keyboard {
-	k := b.wsKey(ws.WorktreeID)
+	k := b.wsKey(*ws)
 	return &Keyboard{InlineKeyboard: [][]Button{{
 		{Text: "🖥 Экран", CallbackData: "scr:" + k},
 		{Text: "⏹ Стоп", CallbackData: "stp:" + k},
@@ -482,7 +679,7 @@ func (b *Bot) showCurrent(ctx context.Context, chatID int64) {
 		return
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s <b>%s</b>\n%s\n", statusEmoji(ws.Status), esc(ws.Name()), b.whereText(ctx, *ws))
+	fmt.Fprintf(&sb, "%s <b>%s</b>\n%s\n", stateOf(*ws).emoji, esc(ws.Name()), b.whereText(ctx, *ws))
 	if ws.Comment != "" {
 		fmt.Fprintf(&sb, "💬 %s\n", esc(truncRunes(ws.Comment, 300)))
 	}
@@ -512,7 +709,7 @@ func (b *Bot) sendToAgent(ctx context.Context, chatID int64, text string) {
 		b.reply(ctx, chatID, b.noTermText(ctx, *ws, term), nil)
 		return
 	}
-	if err := b.orca.Send(ctx, term.Handle, text); err != nil {
+	if err := b.orca.Send(ctx, ws.Env, term.Handle, text); err != nil {
 		b.replyErr(ctx, chatID, "terminal send", err)
 		return
 	}
@@ -529,7 +726,7 @@ func (b *Bot) showScreen(ctx context.Context, chatID int64, n int) {
 		b.reply(ctx, chatID, b.noTermText(ctx, *ws, term), nil)
 		return
 	}
-	lines, err := b.orca.Screen(ctx, term.Handle)
+	lines, err := b.orca.Screen(ctx, ws.Env, term.Handle)
 	if err != nil {
 		b.replyErr(ctx, chatID, "terminal read", err)
 		return
@@ -554,7 +751,7 @@ func (b *Bot) interrupt(ctx context.Context, chatID int64) {
 		b.reply(ctx, chatID, b.noTermText(ctx, *ws, term), nil)
 		return
 	}
-	if err := b.orca.Interrupt(ctx, term.Handle); err != nil {
+	if err := b.orca.Interrupt(ctx, ws.Env, term.Handle); err != nil {
 		b.replyErr(ctx, chatID, "interrupt", err)
 		return
 	}
@@ -595,21 +792,47 @@ func (b *Bot) listTerminals(ctx context.Context, chatID int64) {
 }
 
 func (b *Bot) listRepos(ctx context.Context, chatID int64) {
-	repos, err := b.orca.Repos(ctx)
-	if err != nil {
-		b.replyErr(ctx, chatID, "repo list", err)
-		return
+	repos, failed := b.orca.ReposAll(ctx)
+	var sb strings.Builder
+	for _, f := range failed {
+		fmt.Fprintf(&sb, "🔌 %s не отвечает: <code>%s</code>\n", esc(targetLabel(f.Target)), esc(truncRunes(f.Err.Error(), 200)))
 	}
 	if len(repos) == 0 {
-		b.reply(ctx, chatID, "Репозиториев нет — добавьте их в Orca.", nil)
+		b.reply(ctx, chatID, sb.String()+"Репозиториев нет — добавьте их в Orca.", nil)
 		return
 	}
-	var sb strings.Builder
 	sb.WriteString("Репозитории (имя для /new):\n")
 	for _, r := range repos {
-		fmt.Fprintf(&sb, "• <code>%s</code> — %s\n", esc(repoName(r)), esc(r.Path))
+		where := ""
+		if r.Env != "" {
+			where = " 🌐 " + esc(r.EnvName)
+		}
+		fmt.Fprintf(&sb, "• <code>%s</code>%s — %s\n", esc(repoName(r)), where, esc(r.Path))
+	}
+	if hasDupNames(repos) {
+		sb.WriteString("\nЕсли имя есть на нескольких серверах, укажите сервер: <code>/new сервер/репо …</code>")
 	}
 	b.reply(ctx, chatID, sb.String(), nil)
+}
+
+func hasDupNames(repos []Repo) bool {
+	seen := map[string]bool{}
+	for _, r := range repos {
+		n := strings.ToLower(repoName(r))
+		if seen[n] {
+			return true
+		}
+		seen[n] = true
+	}
+	return false
+}
+
+// targetLabel — имя рантайма для сообщений.
+func targetLabel(t Target) string {
+	if t.Env == "" {
+		return "Orca на этой машине"
+	}
+	return "Orca «" + t.Name + "»"
 }
 
 func repoName(r Repo) string {
@@ -619,17 +842,33 @@ func repoName(r Repo) string {
 	return filepath.Base(r.Path)
 }
 
+// findRepo ищет репозиторий по имени; «сервер/имя» ограничивает поиск сервером Orca.
 func findRepo(repos []Repo, q string) (*Repo, error) {
+	if srv, name, ok := strings.Cut(q, "/"); ok && srv != "" && name != "" {
+		var sub []Repo
+		for _, r := range repos {
+			if strings.EqualFold(r.EnvName, srv) || (r.Env == "" && strings.EqualFold(srv, "local")) {
+				sub = append(sub, r)
+			}
+		}
+		if len(sub) > 0 {
+			return findRepo(sub, name)
+		}
+	}
 	ql := strings.ToLower(q)
-	var hits []*Repo
+	var exact, hits []*Repo
 	for i := range repos {
 		r := &repos[i]
 		if strings.ToLower(repoName(*r)) == ql || strings.ToLower(filepath.Base(r.Path)) == ql || r.ID == q {
-			return r, nil
+			exact = append(exact, r)
+			continue
 		}
 		if strings.Contains(strings.ToLower(repoName(*r)), ql) {
 			hits = append(hits, r)
 		}
+	}
+	if len(exact) > 0 {
+		hits = exact
 	}
 	switch len(hits) {
 	case 1:
@@ -637,7 +876,7 @@ func findRepo(repos []Repo, q string) (*Repo, error) {
 	case 0:
 		return nil, fmt.Errorf("репозиторий «%s» не найден, см. /repos", q)
 	}
-	return nil, fmt.Errorf("«%s» подходит к нескольким репозиториям, уточните (/repos)", q)
+	return nil, fmt.Errorf("«%s» подходит к нескольким репозиториям, уточните (/repos; можно «сервер/репо»)", q)
 }
 
 // /new <репо> <имя> [задача]
@@ -647,9 +886,9 @@ func (b *Bot) newWorktree(ctx context.Context, chatID int64, args string) {
 		b.reply(ctx, chatID, "Использование: <code>/new репо имя-ветки [задача для агента]</code>\nСписок репозиториев: /repos", nil)
 		return
 	}
-	repos, err := b.orca.Repos(ctx)
-	if err != nil {
-		b.replyErr(ctx, chatID, "repo list", err)
+	repos, failed := b.orca.ReposAll(ctx)
+	if len(repos) == 0 && len(failed) > 0 {
+		b.replyErr(ctx, chatID, "repo list", failed[0].Err)
 		return
 	}
 	repo, err := findRepo(repos, f[0])
@@ -660,13 +899,13 @@ func (b *Bot) newWorktree(ctx context.Context, chatID int64, args string) {
 	name := f[1]
 	prompt := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(args, f[0])), name))
 	b.reply(ctx, chatID, "⏳ Создаю <b>"+esc(name)+"</b> в "+esc(repoName(*repo))+"…", nil)
-	wtID, err := b.orca.CreateWorktree(ctx, repo.ID, name, b.agent, prompt)
+	wtID, err := b.orca.CreateWorktree(ctx, repo.Env, repo.ID, name, b.agent, prompt)
 	if err != nil {
 		b.replyErr(ctx, chatID, "worktree create", err)
 		return
 	}
 	if wtID != "" {
-		b.updateChat(chatID, func(c *chatState) { c.WorktreeID = wtID; c.Terminal = "" })
+		b.updateChat(chatID, func(c *chatState) { c.Env, c.WorktreeID, c.Terminal = repo.Env, wtID, "" })
 	}
 	b.reply(ctx, chatID, "✅ Воркtree создан, агент "+esc(b.agent)+" запущен и выбран. /cur — подробности.", nil)
 }
@@ -687,7 +926,7 @@ func (b *Bot) launchAgent(ctx context.Context, chatID int64, args string) {
 	if first, rest, _ := strings.Cut(args, " "); knownAgents[strings.ToLower(first)] {
 		agent, prompt = strings.ToLower(first), strings.TrimSpace(rest)
 	}
-	if err := b.orca.LaunchAgent(ctx, st.WorktreeID, agent, prompt); err != nil {
+	if err := b.orca.LaunchAgent(ctx, st.Env, st.WorktreeID, agent, prompt); err != nil {
 		b.replyErr(ctx, chatID, "agent launch", err)
 		return
 	}
@@ -715,51 +954,73 @@ func (b *Bot) setNotify(ctx context.Context, chatID int64, args string) {
 
 // ---------- уведомления ----------
 
-// Watch опрашивает worktree ps и сообщает, когда агент закончил работу или ждёт разрешения.
+// Watch опрашивает worktree ps во всех рантаймах и сообщает, когда агент закончил работу или ждёт разрешения.
 func (b *Bot) Watch(ctx context.Context, interval time.Duration) {
-	prev := map[string]string{}
+	prev := map[string]string{}    // Workspace.Key() -> статус
+	prevEnv := map[string]string{} // Workspace.Key() -> рантайм
 	lastNotified := map[string]time.Time{}
-	first := true
-	fails := 0
-	down := false
+	fails := map[string]int{}  // рантайм -> сбоев подряд
+	down := map[string]bool{}  // рантайм -> уже сообщили, что не отвечает
+	known := map[string]bool{} // рантаймы, у которых уже был первый снимок
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		list, err := b.orca.PS(ctx)
-		if err != nil {
-			fails++
-			log.Printf("watch: %v", err)
+		list, failed := b.orca.PSAll(ctx)
+		failedEnv := map[string]bool{}
+		for _, f := range failed {
+			env := f.Target.Env
+			failedEnv[env] = true
+			fails[env]++
+			log.Printf("watch %s: %v", targetLabel(f.Target), f.Err)
 			// Не шумим из-за единичного сбоя: сообщаем после трёх подряд.
-			if fails == 3 && !down {
-				down = true
-				b.broadcast(ctx, "🔌 Orca не отвечает: <code>"+esc(truncRunes(err.Error(), 500))+"</code>", nil)
+			if fails[env] == 3 && !down[env] {
+				down[env] = true
+				b.broadcast(ctx, "🔌 "+esc(targetLabel(f.Target))+" не отвечает: <code>"+esc(truncRunes(f.Err.Error(), 500))+"</code>", nil)
 			}
-		} else {
-			if down {
-				b.broadcast(ctx, "🔌 Orca снова на связи", nil)
+		}
+		for _, tg := range b.orca.Targets(ctx) {
+			if failedEnv[tg.Env] {
+				continue
 			}
-			fails, down = 0, false
-			cur := map[string]string{}
-			for _, w := range list {
-				cur[w.WorktreeID] = w.Status
-				p, seen := prev[w.WorktreeID]
-				if first || !seen || p == w.Status {
+			if down[tg.Env] {
+				b.broadcast(ctx, "🔌 "+esc(targetLabel(tg))+" снова на связи", nil)
+			}
+			fails[tg.Env], down[tg.Env] = 0, false
+		}
+
+		cur := map[string]string{}
+		curEnv := map[string]string{}
+		// Воркспейсы недоступных рантаймов помним как были, чтобы не пропустить переход после восстановления связи.
+		for k, st := range prev {
+			if failedEnv[prevEnv[k]] {
+				cur[k], curEnv[k] = st, prevEnv[k]
+			}
+		}
+		for _, w := range list {
+			k := w.Key()
+			cur[k], curEnv[k] = w.Status, w.Env
+			p, seen := prev[k]
+			if !known[w.Env] || !seen || p == w.Status {
+				continue
+			}
+			switch {
+			case w.Status == "permission":
+				b.notify(ctx, w, "⚠️ <b>%s</b> ждёт разрешения")
+			case p == "working" && w.Status != "working":
+				// Защита от дребезга статуса между шагами агента.
+				if time.Since(lastNotified[k]) < 20*time.Second {
 					continue
 				}
-				switch {
-				case w.Status == "permission":
-					b.notify(ctx, w, "⚠️ <b>%s</b> ждёт разрешения")
-				case p == "working" && w.Status != "working":
-					// Защита от дребезга статуса между шагами агента.
-					if time.Since(lastNotified[w.WorktreeID]) < 20*time.Second {
-						continue
-					}
-					lastNotified[w.WorktreeID] = time.Now()
-					b.notify(ctx, w, "✅ <b>%s</b>: агент закончил")
-				}
+				lastNotified[k] = time.Now()
+				b.notify(ctx, w, "✅ <b>%s</b>: агент закончил")
 			}
-			prev, first = cur, false
 		}
+		for _, tg := range b.orca.Targets(ctx) {
+			if !failedEnv[tg.Env] {
+				known[tg.Env] = true
+			}
+		}
+		prev, prevEnv = cur, curEnv
 		select {
 		case <-ctx.Done():
 			return
@@ -780,7 +1041,7 @@ func (b *Bot) notify(ctx context.Context, w Workspace, headFmt string) {
 			fmt.Fprintf(&sb, "\n<blockquote expandable>%s</blockquote>", esc(truncRunes(*a.LastAssistantMessage, 2500)))
 		}
 	}
-	k := b.wsKey(w.WorktreeID)
+	k := b.wsKey(w)
 	kb := &Keyboard{InlineKeyboard: [][]Button{{
 		{Text: "💬 Ответить", CallbackData: "sel:" + k},
 		{Text: "🖥 Экран", CallbackData: "scr:" + k},
