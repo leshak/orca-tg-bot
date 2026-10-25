@@ -1,10 +1,103 @@
 # orca-tg-bot
 
+**[English](#english)** · **[Русский](#русский)**
+
+## English
+
+A Telegram bot for [Orca](https://github.com/stablyai/orca): list workspaces and agents, chat with an agent, view its terminal screen, interrupt it, create worktrees, and get notified when an agent finishes or is waiting for permission.
+
+The bot talks to Orca only through the official CLI (`orca-ide … --json`) — no custom API and no Orca cloud relay. Telegram is polled with long polling, so no inbound ports need to be opened. No external dependencies — just the Go standard library.
+
+The bot's interface (replies and buttons) is in Russian.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `/ws` | Workspaces with agent status; pick one with a button |
+| `/cur` | Current selection + the agent's last reply |
+| *any text* | Send it to the selected agent (Enter is pressed for you) |
+| `/send /compact` | Send text that starts with a slash (Claude Code slash commands) |
+| `/read [N]` | The agent's current terminal screen, tidied up for a phone: terminal line wraps are joined, separators are shortened. N — last N lines (default: the whole screen). The «🔄 Обновить» (Refresh) button redraws the same message |
+| `/stop` | Interrupt the agent (Ctrl+C) |
+| `/term` | Pick a specific terminal if the workspace has several |
+| `/repos` | Repositories in Orca |
+| `/new app fix-login fix the login` | New worktree in repo `app`, branch `fix-login`; the agent gets the task right away |
+| `/agent [codex] [task]` | Another agent in the selected workspace |
+| `/notify on\|off` | Notifications |
+
+Notifications arrive when a workspace's status changes from "working" to anything else (the agent finished) and when an agent is waiting for permission. A notification includes the agent's last reply and «Ответить» (Reply) and «Экран» (Screen) buttons.
+
+### How it works
+
+| Bot action | Orca CLI call |
+|---|---|
+| list and notifications | `worktree ps` (`status` field: `working`, `permission`, `done`, …; `agents[].lastAssistantMessage`) |
+| find the agent's terminal | `terminal list --worktree id:<repoId>::<path>`; the agent's terminal is the one whose `tabId:leafId` matches the agent's `paneKey` |
+| message the agent | `terminal send --terminal <h> --text … --enter --wait-submit 10` |
+| screen | `terminal read --terminal <h> --screen` |
+| stop | `terminal send --terminal <h> --interrupt` |
+| new worktree | `worktree create --repo id:… --name … --agent claude --surface terminal --no-parent --prompt …` |
+| another agent | `agent launch --agent … --worktree id:… --surface terminal` |
+
+### Where to run it
+
+Run the bot on the same machine and as the same user as Orca (desktop app or `orca serve`): the CLI finds the running runtime through its metadata in the user's profile.
+
+**Orca on a Mac, some worktrees on Linux over SSH.** Install the bot on the Mac next to Orca. SSH worktrees belong to the Mac runtime: `worktree ps` returns them together with local ones (with `hostId: "ssh:…"`), agent statuses arrive over SSH just like local ones, and Orca proxies `terminal send/read` through its relay on the host. You don't need a separate bot on Linux. Such worktrees are marked `🌐 <SSH target name>` in the list.
+
+If the connection to the SSH host drops, the bot sends nothing and reports that the connection to the host is lost. The agent on the host keeps working (Orca keeps the terminals on the host and reconnects by itself). Once the connection is back, you'll get the usual completion notification.
+
+**Orca server on a remote machine (Remote Orca Server, `orca environment list`).** If Orca runs on an SSH host as a separate server, its workspaces belong to that server rather than to the Mac runtime, and a plain `worktree ps` doesn't show them. The bot discovers such servers via `environment list` (refreshed once a minute), polls them along with the local Orca, and sends commands to their workspaces with `--environment`. They're marked `🌐 <server name>` in the list. If a server doesn't respond, local workspaces are still shown, and `/ws` shows «🔌 не отвечает» (not responding) for that server. In `/new` you can name the server explicitly: `/new devbox/repo branch task`.
+
+The Mac must not sleep: System Settings → Energy → "Prevent automatic sleeping". For autostart, use `dev.orca-tg-bot.plist` (a LaunchAgent; instructions are inside the file).
+
+### Installing on Linux
+
+1. Check that the CLI can see Orca:
+   ```bash
+   orca-ide status --json
+   orca-ide worktree ps --json
+   ```
+   If the command is missing, register the CLI in Orca: Settings → General → Orca CLI. On Linux the command is `orca-ide`; plain `orca` is the GNOME screen reader. On macOS it's `orca` (the bot picks the name based on the OS; `ORCA_BIN` overrides it).
+2. Create a bot with @BotFather and get your id from @userinfobot.
+3. Build and install:
+   ```bash
+   go install github.com/leshak/orca-tg-bot@latest   # the binary goes to ~/go/bin
+   ```
+   Or from a clone of the repo: `go build -o orca-tg-bot .`. For another architecture: `GOOS=linux GOARCH=arm64 go build -o orca-tg-bot .`
+4. Fill in `~/.config/orca-tg-bot/env` following `.env.example` and start the service as described in `orca-tg-bot.service`.
+5. Send the bot `/start`, then `/ws`.
+
+`ORCA_ENVIRONMENT` sets which Orca runtimes to poll. By default (`auto`) that's this machine plus all paired servers from `orca-ide environment list`. You can list them explicitly, comma-separated: `local,devbox`; if the bot doesn't run on the machine with Orca, list just the server name.
+
+### Caveats
+
+- **Orca's native chat.** The CLI can only write to terminals. An agent opened as a chat (Settings → Chat UI) can't be controlled through the bot. Agents launched by the bot itself always start in a terminal (`--surface terminal`). For ones already started from the desktop app, turn off Chat UI or run agents in a terminal.
+- **Access.** Whoever can message the bot effectively runs commands on the server through the agent. That's why `TELEGRAM_ALLOWED_IDS` is required; the bot ignores everyone else.
+- **Multi-line text** is passed to `terminal send` as is. How a particular agent handles it (as one submission or line by line) hasn't been tested; a single line is safer.
+- **Telegram not directly reachable?** Set `TELEGRAM_PROXY` (`socks5://` is supported).
+- Terminal handles live within a runtime: after Orca restarts, a manual `/term` choice is reset and the bot finds the agent's terminal on its own again.
+
+### Tests
+
+```bash
+go test -v ./...
+```
+
+The tests run the real bot against a fake `orca-ide` (a shell script answering in the runtime's format) and a fake Bot API: workspace selection, sending to the agent's terminal, `/read`, `/stop`, `/new`, Orca errors, notifications and turning them off, workspaces on a paired Orca server (`--environment`) and that server going down.
+
+### License
+
+[MIT](LICENSE)
+
+## Русский
+
 Telegram-бот для [Orca](https://github.com/stablyai/orca): список воркспейсов и агентов, переписка с агентом, экран терминала, прерывание, создание воркtree и уведомления, когда агент закончил или ждёт разрешения.
 
 Бот ходит в Orca только через официальный CLI (`orca-ide … --json`), без своего API и без облачного relay Orca. Telegram опрашивается long polling, поэтому порты наружу открывать не нужно. Внешних зависимостей нет — только стандартная библиотека Go.
 
-## Команды
+### Команды
 
 | Команда | Что делает |
 |---|---|
@@ -22,7 +115,7 @@ Telegram-бот для [Orca](https://github.com/stablyai/orca): список в
 
 Уведомления приходят, когда статус воркспейса меняется с «работает» на любой другой (агент закончил) и когда агент ждёт разрешения. В уведомлении — последний ответ агента и кнопки «Ответить» и «Экран».
 
-## Как это устроено
+### Как это устроено
 
 | Действие бота | Вызов Orca CLI |
 |---|---|
@@ -34,7 +127,7 @@ Telegram-бот для [Orca](https://github.com/stablyai/orca): список в
 | новый воркtree | `worktree create --repo id:… --name … --agent claude --surface terminal --no-parent --prompt …` |
 | ещё агент | `agent launch --agent … --worktree id:… --surface terminal` |
 
-## Где запускать
+### Где запускать
 
 Бот запускается на той же машине и от того же пользователя, что и Orca (десктоп или `orca serve`): CLI находит запущенный рантайм по его метаданным в профиле пользователя.
 
@@ -46,7 +139,7 @@ Telegram-бот для [Orca](https://github.com/stablyai/orca): список в
 
 Mac не должен засыпать: Системные настройки → Энергосбережение → «Не переходить в режим сна автоматически». Для автозапуска — `dev.orca-tg-bot.plist` (LaunchAgent, инструкция внутри файла).
 
-## Установка на Linux
+### Установка на Linux
 
 1. Проверьте, что CLI видит Orca:
    ```bash
@@ -65,7 +158,7 @@ Mac не должен засыпать: Системные настройки �
 
 `ORCA_ENVIRONMENT` задаёт, какие рантаймы Orca опрашивать. По умолчанию (`auto`) это эта машина и все сопряжённые серверы из `orca-ide environment list`. Можно перечислить явно через запятую: `local,devbox`, а если бот запущен не на машине с Orca — только имя сервера.
 
-## Важно
+### Важно
 
 - **Нативный чат Orca.** CLI умеет писать только в терминалы. Агент, открытый как чат (Settings → Chat UI), через бот не управляется. Агенты, которых запускает сам бот, всегда стартуют в терминале (`--surface terminal`). Для уже запущенных из десктопа — выключите Chat UI или запускайте агентов в терминале.
 - **Доступ.** Кто может писать боту, тот фактически выполняет команды на сервере руками агента. Поэтому `TELEGRAM_ALLOWED_IDS` обязателен, остальным бот не отвечает.
@@ -73,7 +166,7 @@ Mac не должен засыпать: Системные настройки �
 - **Telegram недоступен напрямую** — задайте `TELEGRAM_PROXY` (поддерживается `socks5://`).
 - Хэндлы терминалов живут в пределах рантайма: после перезапуска Orca ручной выбор `/term` сбрасывается, и бот снова сам находит терминал агента.
 
-## Тесты
+### Тесты
 
 ```bash
 go test -v ./...
@@ -81,6 +174,6 @@ go test -v ./...
 
 Тесты гоняют настоящий бот против фейкового `orca-ide` (shell-скрипт с ответами в формате рантайма) и фейкового Bot API: выбор воркспейса, отправка в терминал агента, `/read`, `/stop`, `/new`, ошибки Orca, уведомления и их отключение, воркспейсы сопряжённого сервера Orca (`--environment`) и его недоступность.
 
-## Лицензия
+### Лицензия
 
 [MIT](LICENSE)
