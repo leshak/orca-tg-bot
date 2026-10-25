@@ -164,6 +164,7 @@ func (b *Bot) saveState() {
 	}
 	data, _ := json.MarshalIndent(b.chats, "", "  ")
 	tmp := b.stateFile + ".tmp"
+	_ = os.MkdirAll(filepath.Dir(b.stateFile), 0o700)
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		log.Printf("state: запись: %v", err)
 		return
