@@ -57,9 +57,9 @@ Mac не должен засыпать: Системные настройки �
 2. Создайте бота у @BotFather, узнайте свой id у @userinfobot.
 3. Соберите и поставьте:
    ```bash
-   go build -o orca-tg-bot .
+   go install github.com/leshak/orca-tg-bot@latest   # бинарник попадёт в ~/go/bin
    ```
-   Для другой архитектуры: `GOOS=linux GOARCH=arm64 go build -o orca-tg-bot .`
+   Или из клона репозитория: `go build -o orca-tg-bot .`. Для другой архитектуры: `GOOS=linux GOARCH=arm64 go build -o orca-tg-bot .`
 4. Заполните `~/.config/orca-tg-bot/env` по образцу `.env.example` и запустите сервис по инструкции в `orca-tg-bot.service`.
 5. Напишите боту `/start`, затем `/ws`.
 
