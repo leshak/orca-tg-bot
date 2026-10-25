@@ -1,19 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  LaunchAgent для macOS: бот работает от вашего пользователя, рядом с запущенным Orca.
+  LaunchAgent для macOS: бот работает от вашего пользователя, рядом с запущенным Orca,
+  стартует при входе в систему и перезапускается, если упал.
+
+  Настройки (токен, id, ORCA_BIN и т. д.) берутся из ~/.config/orca-tg-bot/env —
+  того же формата, что .env.example. Токена в самом plist нет.
 
   Установка:
     go build -o orca-tg-bot . && install -m 755 orca-tg-bot ~/.local/bin/
-    which orca                       # подставьте этот путь в ORCA_BIN ниже
-    cp dev.orca-tg-bot.plist ~/Library/LaunchAgents/
-    chmod 600 ~/Library/LaunchAgents/dev.orca-tg-bot.plist    # внутри токен
-    # замените USER, токен и id ниже
+    mkdir -p ~/.config/orca-tg-bot && cp .env.example ~/.config/orca-tg-bot/env
+    chmod 600 ~/.config/orca-tg-bot/env     # внутри токен; заполните его
+    sed "s|/Users/USER|$HOME|g" dev.orca-tg-bot.plist > ~/Library/LaunchAgents/dev.orca-tg-bot.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.orca-tg-bot.plist
     tail -f ~/Library/Logs/orca-tg-bot.log
 
-  Перезапуск после правок:
+  Перезапуск (после правок env или нового бинарника):
+    launchctl kickstart -k gui/$(id -u)/dev.orca-tg-bot
+
+  Удаление:
     launchctl bootout gui/$(id -u)/dev.orca-tg-bot
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.orca-tg-bot.plist
+    rm ~/Library/LaunchAgents/dev.orca-tg-bot.plist
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -23,25 +29,19 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/USER/.local/bin/orca-tg-bot</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; . "$HOME/.config/orca-tg-bot/env"; set +a; exec "$HOME/.local/bin/orca-tg-bot"</string>
   </array>
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>TELEGRAM_BOT_TOKEN</key>
-    <string>123456789:AA...</string>
-    <key>TELEGRAM_ALLOWED_IDS</key>
-    <string>123456789</string>
-    <key>ORCA_BIN</key>
-    <string>/usr/local/bin/orca</string>
-    <key>DEFAULT_AGENT</key>
-    <string>claude</string>
+    <!-- Значение по умолчанию; STATE_FILE в env-файле его переопределяет -->
     <key>STATE_FILE</key>
-    <string>/Users/USER/Library/Application Support/orca-tg-bot.json</string>
-    <!-- Агенты (claude и др.) запускает сама Orca, но PATH пригодится CLI -->
+    <string>/Users/USER/Library/Application Support/orca-tg-bot/state.json</string>
+    <!-- Агентов (claude и др.) запускает сама Orca, но PATH пригодится CLI -->
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <!-- <key>TELEGRAM_PROXY</key><string>socks5://127.0.0.1:1080</string> -->
   </dict>
 
   <key>RunAtLoad</key>
