@@ -32,12 +32,18 @@ Notifications arrive when a workspace's status changes from "working" to anythin
 
 ### Web interface
 
-Set `WEB_ADDR` and `WEB_TOKEN` and the same binary serves a web page:
+The same binary can also serve a web page for the local network. Like the bot, the page is in Russian.
+
+**Turning it on.** Add two lines to `~/.config/orca-tg-bot/env` (the file the LaunchAgent or systemd service reads):
 
 ```bash
-WEB_ADDR=10.147.17.5:8080            # listen on the ZeroTier/LAN address, not 0.0.0.0
-WEB_TOKEN=$(openssl rand -hex 16)    # at least 12 characters; asked once, then a cookie
+WEB_ADDR=192.168.1.10:8080     # this machine's LAN or ZeroTier/Tailscale address, not 0.0.0.0
+WEB_TOKEN=…                    # at least 12 characters, e.g. the output of: openssl rand -hex 16
 ```
+
+Restart the service (`launchctl kickstart -k gui/$(id -u)/dev.orca-tg-bot` on macOS, `systemctl --user restart orca-tg-bot` on Linux), open `http://<WEB_ADDR>/` on a phone or another computer and enter the token once; after that the browser keeps a cookie. The log shows `веб: http://…` when the server is up.
+
+**What's on the page:**
 
 - **Projects** — as in Orca's sidebar (`project list` of every runtime; on older servers without it, repositories are used). Inside a project are its workspaces with status, host and agents; «+» creates a new worktree with an agent.
 - **Workspace** — tabs for its terminals, the screen of the selected one refreshed about once a second, the agent's last reply, a box for messages (Enter sends on a computer; on a phone, use the button) and keys for menus and permission prompts: Esc, ↑, ↓, Enter, Tab, ⇧Tab, 1–3 and «Стоп» (Ctrl+C). «+ Агент» starts another agent.
@@ -45,6 +51,20 @@ WEB_TOKEN=$(openssl rand -hex 16)    # at least 12 characters; asked once, then 
 - **Telegram is optional**: without `TELEGRAM_BOT_TOKEN` only the web interface runs.
 
 The page shows the terminal as text, without colors: that is what `terminal read --screen` returns. A full interactive terminal (mouse, arbitrary TUI) isn't possible through the CLI.
+
+**How it works.** The web interface uses the same Orca CLI calls as the bot:
+
+| Page | Orca CLI call |
+|---|---|
+| projects | `project list` in every runtime; a workspace belongs to the project whose `sourceRepoIds` contains its `repoId` |
+| workspaces and agents | `worktree ps` (the same snapshot as `/ws`) |
+| terminal tabs | `terminal list --worktree id:…`, every 3 s while the workspace is open |
+| screen | `terminal read --screen`, every `WEB_SCREEN_INTERVAL` |
+| message | `terminal send --text … --enter` |
+| keys | `terminal send --text <bytes>` without Enter (Esc, arrows, digits); «Стоп» — `--interrupt` |
+| new worktree / agent | `worktree create` / `agent launch` |
+
+Server → browser: `GET /api/events` (SSE events `state`, `terms`, `screen`). Browser → server: `POST /api/send`, `/api/key`, `/api/agent`, `/api/worktree` with JSON. The server checks that the runtime is known and that the terminal belongs to the workspace before calling the CLI; keys come from a fixed list.
 
 **Security.** Whoever opens the page controls the agents, and through them the machine. So the server refuses to start without `WEB_TOKEN`, the login is a long token with an `HttpOnly`, `SameSite=Strict` cookie, POST requests from other sites are rejected by `Origin`, and the page is served with a strict CSP. There is no HTTPS: listen only on a trusted network (ZeroTier and Tailscale encrypt traffic themselves) and never expose the port to the internet.
 
@@ -139,12 +159,18 @@ Telegram-бот для [Orca](https://github.com/stablyai/orca): список в
 
 ### Веб-интерфейс
 
-Задайте `WEB_ADDR` и `WEB_TOKEN` — и тот же бинарник поднимет веб-страницу:
+Тот же бинарник умеет отдавать веб-страницу для локальной сети.
+
+**Как включить.** Добавьте две строки в `~/.config/orca-tg-bot/env` (этот файл читают LaunchAgent и сервис systemd):
 
 ```bash
-WEB_ADDR=10.147.17.5:8080            # адрес в ZeroTier/домашней сети, не 0.0.0.0
-WEB_TOKEN=$(openssl rand -hex 16)    # не короче 12 символов; спрашивается один раз, дальше cookie
+WEB_ADDR=192.168.1.10:8080     # адрес этой машины в домашней сети или ZeroTier/Tailscale, не 0.0.0.0
+WEB_TOKEN=…                    # не короче 12 символов, например вывод: openssl rand -hex 16
 ```
+
+Перезапустите сервис (`launchctl kickstart -k gui/$(id -u)/dev.orca-tg-bot` на macOS, `systemctl --user restart orca-tg-bot` на Linux), откройте `http://<WEB_ADDR>/` с телефона или другого компьютера и один раз введите токен — дальше браузер помнит вход. Когда сервер поднялся, в логе появляется `веб: http://…`.
+
+**Что на странице:**
 
 - **Проекты** — как в боковой панели Orca (`project list` всех рантаймов; на старых серверах без него проектом считается репозиторий). Внутри — воркспейсы со статусом, машиной и агентами; «+» создаёт новый воркtree с агентом.
 - **Воркспейс** — вкладки его терминалов, экран выбранного (обновляется примерно раз в секунду), последний ответ агента, поле для сообщений (на компьютере Enter отправляет, на телефоне — кнопка) и клавиши для меню и запросов разрешений: Esc, ↑, ↓, Enter, Tab, ⇧Tab, 1–3 и «Стоп» (Ctrl+C). «+ Агент» запускает ещё одного агента.
@@ -152,6 +178,20 @@ WEB_TOKEN=$(openssl rand -hex 16)    # не короче 12 символов; с
 - **Telegram не обязателен**: без `TELEGRAM_BOT_TOKEN` работает только веб.
 
 Терминал показывается текстом, без цветов: так его отдаёт `terminal read --screen`. Полноценный интерактивный терминал (мышь, произвольные TUI) через CLI не сделать.
+
+**Как это устроено.** Веб пользуется теми же вызовами Orca CLI, что и бот:
+
+| На странице | Вызов Orca CLI |
+|---|---|
+| проекты | `project list` во всех рантаймах; воркспейс относится к проекту, в `sourceRepoIds` которого есть его `repoId` |
+| воркспейсы и агенты | `worktree ps` (тот же снимок, что у `/ws`) |
+| вкладки терминалов | `terminal list --worktree id:…`, раз в 3 с, пока воркспейс открыт |
+| экран | `terminal read --screen`, раз в `WEB_SCREEN_INTERVAL` |
+| сообщение | `terminal send --text … --enter` |
+| клавиши | `terminal send --text <байты>` без Enter (Esc, стрелки, цифры); «Стоп» — `--interrupt` |
+| новый воркtree / агент | `worktree create` / `agent launch` |
+
+Сервер → браузер: `GET /api/events` (события SSE `state`, `terms`, `screen`). Браузер → сервер: `POST /api/send`, `/api/key`, `/api/agent`, `/api/worktree` с JSON. Перед вызовом CLI сервер проверяет, что рантайм известен, а терминал принадлежит воркспейсу; клавиши — только из фиксированного списка.
 
 **Безопасность.** Кто открыл страницу, тот управляет агентами, а через них и машиной. Поэтому без `WEB_TOKEN` сервер не запускается, вход — по длинному токену с cookie `HttpOnly` и `SameSite=Strict`, POST-запросы с чужих сайтов отсекаются по `Origin`, страница отдаётся со строгим CSP. HTTPS нет: слушайте только доверенную сеть (ZeroTier и Tailscale шифруют трафик сами) и не открывайте порт в интернет.
 
