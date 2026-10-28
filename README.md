@@ -10,6 +10,8 @@ The bot talks to Orca only through the official CLI (`orca-ide … --json`) — 
 
 The bot's interface (replies and buttons) is in Russian.
 
+There is also an optional [web interface](#web-interface) for the local network (home LAN, ZeroTier, Tailscale): projects as in Orca's sidebar, live terminal screens, input for agents. Telegram and the web interface can run together or separately.
+
 ### Commands
 
 | Command | What it does |
@@ -27,6 +29,24 @@ The bot's interface (replies and buttons) is in Russian.
 | `/notify on\|off` | Notifications |
 
 Notifications arrive when a workspace's status changes from "working" to anything else (the agent finished) and when an agent is waiting for permission. A notification includes the agent's last reply and «Ответить» (Reply) and «Экран» (Screen) buttons.
+
+### Web interface
+
+Set `WEB_ADDR` and `WEB_TOKEN` and the same binary serves a web page:
+
+```bash
+WEB_ADDR=10.147.17.5:8080            # listen on the ZeroTier/LAN address, not 0.0.0.0
+WEB_TOKEN=$(openssl rand -hex 16)    # at least 12 characters; asked once, then a cookie
+```
+
+- **Projects** — as in Orca's sidebar (`project list` of every runtime; on older servers without it, repositories are used). Inside a project are its workspaces with status, host and agents; «+» creates a new worktree with an agent.
+- **Workspace** — tabs for its terminals, the screen of the selected one refreshed about once a second, the agent's last reply, a box for messages (Enter sends on a computer; on a phone, use the button) and keys for menus and permission prompts: Esc, ↑, ↓, Enter, Tab, ⇧Tab, 1–3 and «Стоп» (Ctrl+C). «+ Агент» starts another agent.
+- **Live updates** go over Server-Sent Events: the page holds one connection and reconnects by itself. Orca has no event stream, so the server polls the CLI (statuses every `WEB_POLL_INTERVAL`, default 2s, only while a page is open; the open screen every `WEB_SCREEN_INTERVAL`, default 1s) and sends only changes.
+- **Telegram is optional**: without `TELEGRAM_BOT_TOKEN` only the web interface runs.
+
+The page shows the terminal as text, without colors: that is what `terminal read --screen` returns. A full interactive terminal (mouse, arbitrary TUI) isn't possible through the CLI.
+
+**Security.** Whoever opens the page controls the agents, and through them the machine. So the server refuses to start without `WEB_TOKEN`, the login is a long token with an `HttpOnly`, `SameSite=Strict` cookie, POST requests from other sites are rejected by `Origin`, and the page is served with a strict CSP. There is no HTTPS: listen only on a trusted network (ZeroTier and Tailscale encrypt traffic themselves) and never expose the port to the internet.
 
 ### How it works
 
@@ -85,7 +105,7 @@ The Mac must not sleep: System Settings → Energy → "Prevent automatic sleepi
 go test -v ./...
 ```
 
-The tests run the real bot against a fake `orca-ide` (a shell script answering in the runtime's format) and a fake Bot API: workspace selection, sending to the agent's terminal, `/read`, `/stop`, `/new`, Orca errors, notifications and turning them off, workspaces on a paired Orca server (`--environment`) and that server going down.
+The tests run the real bot against a fake `orca-ide` (a shell script answering in the runtime's format) and a fake Bot API: workspace selection, sending to the agent's terminal, `/read`, `/stop`, `/new`, Orca errors, notifications and turning them off, workspaces on a paired Orca server (`--environment`) and that server going down. The web interface is tested the same way: login and `Origin` checks, sending text and keys, input validation, grouping into projects and the SSE stream.
 
 ### License
 
@@ -96,6 +116,8 @@ The tests run the real bot against a fake `orca-ide` (a shell script answering i
 Telegram-бот для [Orca](https://github.com/stablyai/orca): список воркспейсов и агентов, переписка с агентом, экран терминала, прерывание, создание воркtree и уведомления, когда агент закончил или ждёт разрешения.
 
 Бот ходит в Orca только через официальный CLI (`orca-ide … --json`), без своего API и без облачного relay Orca. Telegram опрашивается long polling, поэтому порты наружу открывать не нужно. Внешних зависимостей нет — только стандартная библиотека Go.
+
+Есть и необязательный [веб-интерфейс](#веб-интерфейс) для локальной сети (дом, ZeroTier, Tailscale): проекты как в боковой панели Orca, живые экраны терминалов, ввод для агентов. Telegram и веб работают вместе или по отдельности.
 
 ### Команды
 
@@ -114,6 +136,24 @@ Telegram-бот для [Orca](https://github.com/stablyai/orca): список в
 | `/notify on\|off` | Уведомления |
 
 Уведомления приходят, когда статус воркспейса меняется с «работает» на любой другой (агент закончил) и когда агент ждёт разрешения. В уведомлении — последний ответ агента и кнопки «Ответить» и «Экран».
+
+### Веб-интерфейс
+
+Задайте `WEB_ADDR` и `WEB_TOKEN` — и тот же бинарник поднимет веб-страницу:
+
+```bash
+WEB_ADDR=10.147.17.5:8080            # адрес в ZeroTier/домашней сети, не 0.0.0.0
+WEB_TOKEN=$(openssl rand -hex 16)    # не короче 12 символов; спрашивается один раз, дальше cookie
+```
+
+- **Проекты** — как в боковой панели Orca (`project list` всех рантаймов; на старых серверах без него проектом считается репозиторий). Внутри — воркспейсы со статусом, машиной и агентами; «+» создаёт новый воркtree с агентом.
+- **Воркспейс** — вкладки его терминалов, экран выбранного (обновляется примерно раз в секунду), последний ответ агента, поле для сообщений (на компьютере Enter отправляет, на телефоне — кнопка) и клавиши для меню и запросов разрешений: Esc, ↑, ↓, Enter, Tab, ⇧Tab, 1–3 и «Стоп» (Ctrl+C). «+ Агент» запускает ещё одного агента.
+- **Обновления в реальном времени** идут через Server-Sent Events: страница держит одно соединение и сама переподключается. Потока событий у Orca нет, поэтому сервер опрашивает CLI (статусы — раз в `WEB_POLL_INTERVAL`, по умолчанию 2s, и только пока страница открыта; открытый экран — раз в `WEB_SCREEN_INTERVAL`, по умолчанию 1s) и отправляет только изменения.
+- **Telegram не обязателен**: без `TELEGRAM_BOT_TOKEN` работает только веб.
+
+Терминал показывается текстом, без цветов: так его отдаёт `terminal read --screen`. Полноценный интерактивный терминал (мышь, произвольные TUI) через CLI не сделать.
+
+**Безопасность.** Кто открыл страницу, тот управляет агентами, а через них и машиной. Поэтому без `WEB_TOKEN` сервер не запускается, вход — по длинному токену с cookie `HttpOnly` и `SameSite=Strict`, POST-запросы с чужих сайтов отсекаются по `Origin`, страница отдаётся со строгим CSP. HTTPS нет: слушайте только доверенную сеть (ZeroTier и Tailscale шифруют трафик сами) и не открывайте порт в интернет.
 
 ### Как это устроено
 
@@ -172,7 +212,7 @@ Mac не должен засыпать: Системные настройки �
 go test -v ./...
 ```
 
-Тесты гоняют настоящий бот против фейкового `orca-ide` (shell-скрипт с ответами в формате рантайма) и фейкового Bot API: выбор воркспейса, отправка в терминал агента, `/read`, `/stop`, `/new`, ошибки Orca, уведомления и их отключение, воркспейсы сопряжённого сервера Orca (`--environment`) и его недоступность.
+Тесты гоняют настоящий бот против фейкового `orca-ide` (shell-скрипт с ответами в формате рантайма) и фейкового Bot API: выбор воркспейса, отправка в терминал агента, `/read`, `/stop`, `/new`, ошибки Orca, уведомления и их отключение, воркспейсы сопряжённого сервера Orca (`--environment`) и его недоступность. Веб-интерфейс проверяется так же: вход и проверка `Origin`, отправка текста и клавиш, проверка ввода, группировка по проектам и поток SSE.
 
 ### Лицензия
 
