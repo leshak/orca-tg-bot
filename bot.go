@@ -39,59 +39,6 @@ type Bot struct {
 	chats map[int64]*chatState
 	ids   map[string]wsRef  // короткий id -> воркспейс (callback_data ограничен 64 байтами)
 	terms map[string]string // короткий id -> handle терминала
-
-	hostNames   map[string]string // hostId ("ssh:…") -> имя SSH-цели из `host list`
-	machineName string            // имя этой машины из `host list`
-	hostsLoaded time.Time
-}
-
-// hostLabel возвращает понятное имя удалённого хоста ("" для локального).
-// Имена берутся из `host list` и кэшируются на минуту; при ошибке показываем сам id.
-func (b *Bot) hostLabel(ctx context.Context, hostID string) string {
-	if hostID == "" || hostID == "local" {
-		return ""
-	}
-	b.mu.Lock()
-	stale := time.Since(b.hostsLoaded) > time.Minute
-	b.mu.Unlock()
-	if stale {
-		if hosts, err := b.orca.Hosts(ctx); err == nil {
-			names := map[string]string{}
-			machine := ""
-			for _, h := range hosts {
-				if h.Kind == "local" && h.MachineName != "" {
-					machine = strings.ReplaceAll(h.MachineName, "\u00a0", " ")
-				}
-				if h.Name == "" {
-					continue
-				}
-				for _, k := range []string{h.Selector, h.ID, h.Kind + ":" + h.ID} {
-					if k != "" {
-						names[k] = h.Name
-					}
-				}
-				if h.Kind == "ssh" {
-					names["ssh:"+h.ID] = h.Name
-				}
-			}
-			b.mu.Lock()
-			b.hostNames, b.machineName, b.hostsLoaded = names, machine, time.Now()
-			b.mu.Unlock()
-		} else {
-			// Не дёргаем CLI на каждое сообщение, если host list недоступен.
-			b.mu.Lock()
-			b.hostsLoaded = time.Now()
-			b.mu.Unlock()
-		}
-	}
-	b.mu.Lock()
-	name := b.hostNames[hostID]
-	b.mu.Unlock()
-	if name != "" {
-		return name
-	}
-	_, rest, _ := strings.Cut(hostID, ":")
-	return rest
 }
 
 // whereText — «repo · branch» плюс хост для SSH/удалённых воркtree.
@@ -100,29 +47,16 @@ func (b *Bot) whereText(ctx context.Context, w Workspace) string {
 	if br := w.ShortBranch(); br != "" {
 		s += " · <code>" + esc(br) + "</code>"
 	}
-	if h := b.wsHost(ctx, w); h != "" {
+	if h := b.orca.WSHost(ctx, w); h != "" {
 		s += " · 🌐 " + esc(h)
 	}
 	return s
 }
 
-// wsHost — где живёт воркспейс: имя сервера Orca и/или SSH-цели; "" для этой машины.
-func (b *Bot) wsHost(ctx context.Context, w Workspace) string {
-	if w.Env != "" {
-		// SSH-цели удалённого рантайма по имени не разрешаем: показываем id.
-		if w.HostID != "" && w.HostID != "local" {
-			_, rest, _ := strings.Cut(w.HostID, ":")
-			return w.EnvName + "/" + rest
-		}
-		return w.EnvName
-	}
-	return b.hostLabel(ctx, w.HostID)
-}
-
 // noTermText объясняет, почему писать некуда: нет терминалов или потеряна связь с хостом.
 func (b *Bot) noTermText(ctx context.Context, w Workspace, term *Terminal) string {
 	if w.UnverifiableTerminalCount > 0 || (term != nil && term.Verdict == "unverifiable") {
-		h := b.wsHost(ctx, w)
+		h := b.orca.WSHost(ctx, w)
 		if h == "" {
 			h = "хостом"
 		} else {
@@ -392,17 +326,15 @@ type wsGroup struct {
 func (b *Bot) groupOf(ctx context.Context, w Workspace) (key, title string, order int) {
 	switch {
 	case w.Env != "":
-		return "env:" + w.Env + "|" + w.HostID, "🌐 " + esc(b.wsHost(ctx, w)), 2
+		return "env:" + w.Env + "|" + w.HostID, "🌐 " + esc(b.orca.WSHost(ctx, w)), 2
 	case w.HostID == "" || w.HostID == "local":
-		name := "Эта машина"
-		b.mu.Lock()
-		if b.machineName != "" {
-			name = b.machineName
+		name := b.orca.MachineName()
+		if name == "" {
+			name = "Эта машина"
 		}
-		b.mu.Unlock()
 		return "local", "💻 " + esc(name), 0
 	}
-	return w.HostID, "🌐 " + esc(b.hostLabel(ctx, w.HostID)), 1
+	return w.HostID, "🌐 " + esc(b.orca.HostLabel(ctx, w.HostID)), 1
 }
 
 // wsState — состояние воркспейса для человека. Опирается прежде всего на агента:
@@ -485,7 +417,7 @@ func (b *Bot) listWorkspaces(ctx context.Context, chatID int64) {
 		b.replyErr(ctx, chatID, "worktree ps", failed[0].Err)
 		return
 	}
-	b.hostLabel(ctx, "ssh:") // подгрузить имена машин из `host list`
+	b.orca.HostLabel(ctx, "ssh:") // подгрузить имена машин из `host list`
 
 	groups := map[string]*wsGroup{}
 	var order []*wsGroup

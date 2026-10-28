@@ -37,6 +37,10 @@ type Orca struct {
 	mu           sync.Mutex
 	discovered   []Target
 	discoveredAt time.Time
+
+	hostNames   map[string]string // hostId ("ssh:…") -> имя SSH-цели из `host list`
+	machineName string            // имя этой машины из `host list`
+	hostsLoaded time.Time
 }
 
 // OrcaError — ошибка, которую вернул сам рантайм Orca (ok:false).
@@ -274,6 +278,84 @@ func (o *Orca) TargetName(ctx context.Context, env string) string {
 		}
 	}
 	return env
+}
+
+// ---- Имена машин ----
+
+// loadHosts обновляет имена машин из `host list` не чаще раза в минуту.
+// При ошибке тоже ждём минуту, чтобы не дёргать CLI на каждый запрос.
+func (o *Orca) loadHosts(ctx context.Context) {
+	o.mu.Lock()
+	stale := time.Since(o.hostsLoaded) > time.Minute
+	if stale {
+		o.hostsLoaded = time.Now()
+	}
+	o.mu.Unlock()
+	if !stale {
+		return
+	}
+	hosts, err := o.Hosts(ctx)
+	if err != nil {
+		return
+	}
+	names := map[string]string{}
+	machine := ""
+	for _, h := range hosts {
+		if h.Kind == "local" && h.MachineName != "" {
+			machine = strings.ReplaceAll(h.MachineName, "\u00a0", " ")
+		}
+		if h.Name == "" {
+			continue
+		}
+		for _, k := range []string{h.Selector, h.ID, h.Kind + ":" + h.ID} {
+			if k != "" {
+				names[k] = h.Name
+			}
+		}
+		if h.Kind == "ssh" {
+			names["ssh:"+h.ID] = h.Name
+		}
+	}
+	o.mu.Lock()
+	o.hostNames, o.machineName = names, machine
+	o.mu.Unlock()
+}
+
+// HostLabel возвращает понятное имя удалённого хоста ("" для локального).
+// Если имя неизвестно, показываем сам id.
+func (o *Orca) HostLabel(ctx context.Context, hostID string) string {
+	if hostID == "" || hostID == "local" {
+		return ""
+	}
+	o.loadHosts(ctx)
+	o.mu.Lock()
+	name := o.hostNames[hostID]
+	o.mu.Unlock()
+	if name != "" {
+		return name
+	}
+	_, rest, _ := strings.Cut(hostID, ":")
+	return rest
+}
+
+// MachineName — имя этой машины из `host list` ("" если неизвестно).
+func (o *Orca) MachineName() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.machineName
+}
+
+// WSHost — где живёт воркспейс: имя сервера Orca и/или SSH-цели; "" для этой машины.
+func (o *Orca) WSHost(ctx context.Context, w Workspace) string {
+	if w.Env != "" {
+		// SSH-цели удалённого рантайма по имени не разрешаем: показываем id.
+		if w.HostID != "" && w.HostID != "local" {
+			_, rest, _ := strings.Cut(w.HostID, ":")
+			return w.EnvName + "/" + rest
+		}
+		return w.EnvName
+	}
+	return o.HostLabel(ctx, w.HostID)
 }
 
 // ---- Команды ----
