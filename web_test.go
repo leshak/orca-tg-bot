@@ -91,9 +91,41 @@ func TestWebAuth(t *testing.T) {
 	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
 		t.Errorf("нет CSP: %q", csp)
 	}
-	// Запрос с чужого сайта не проходит, даже с cookie.
-	if code, _ := postJSON(t, c, srv.URL+"/api/send", `{"text":"x"}`, "Origin", "http://evil.example"); code != http.StatusForbidden {
-		t.Fatalf("чужой Origin: %d", code)
+	if rp := resp.Header.Get("Referrer-Policy"); rp == "no-referrer" {
+		t.Errorf("при no-referrer браузер шлёт Origin: null и свои POST отклоняются")
+	}
+
+	// Свои запросы — как их шлёт браузер по HTTP: с Origin нашего адреса.
+	own := srv.URL
+	if code, _ := postJSON(t, c, srv.URL+"/api/key", `{"key":"rm"}`, "Origin", own); code != http.StatusBadRequest {
+		t.Errorf("свой Origin не пропущен: %d", code)
+	}
+	if code, _ := postJSON(t, c, srv.URL+"/api/key", `{"key":"rm"}`, "Origin", "null", "Sec-Fetch-Site", "same-origin"); code != http.StatusBadRequest {
+		t.Errorf("Sec-Fetch-Site: same-origin не пропущен: %d", code)
+	}
+	// С чужого сайта — нет, даже с cookie.
+	for _, h := range [][]string{
+		{"Origin", "http://evil.example"},
+		{"Origin", "null"},
+		{"Origin", own, "Sec-Fetch-Site", "cross-site"},
+		{"Origin", "http://evil.example", "Sec-Fetch-Site", "same-site"},
+	} {
+		if code, _ := postJSON(t, c, srv.URL+"/api/send", `{"text":"x"}`, h...); code != http.StatusForbidden {
+			t.Errorf("чужой запрос %v: %d", h, code)
+		}
+	}
+
+	// Форма входа из браузера тоже несёт Origin.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/login", strings.NewReader("token="+testWebToken))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", own)
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/" {
+		t.Errorf("вход с Origin: %d %s", resp.StatusCode, resp.Header.Get("Location"))
 	}
 }
 

@@ -135,7 +135,8 @@ func secure(next http.Handler) http.Handler {
 		h := rw.Header()
 		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
+		// Не no-referrer: при нём браузер шлёт в POST «Origin: null», и свой запрос не отличить от чужого.
+		h.Set("Referrer-Policy", "same-origin")
 		if strings.HasPrefix(r.URL.Path, "/static/") {
 			h.Set("Cache-Control", "no-cache")
 		}
@@ -147,11 +148,16 @@ func secure(next http.Handler) http.Handler {
 	})
 }
 
-// sameOrigin: у POST из браузера Origin должен совпадать с адресом сервера.
+// sameOrigin: POST из браузера должен прийти с нашей же страницы.
+// Sec-Fetch-Site браузеры шлют только по HTTPS, поэтому в локальной сети проверяем Origin;
+// «Origin: null» (песочница, no-referrer) считаем чужим. Без обоих заголовков — не браузер.
 func sameOrigin(r *http.Request) bool {
+	if s := r.Header.Get("Sec-Fetch-Site"); s != "" {
+		return s == "same-origin" || s == "none"
+	}
 	o := r.Header.Get("Origin")
 	if o == "" {
-		return r.Header.Get("Sec-Fetch-Site") == "" || r.Header.Get("Sec-Fetch-Site") == "same-origin"
+		return true
 	}
 	u, err := url.Parse(o)
 	return err == nil && u.Host == r.Host
