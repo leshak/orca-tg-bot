@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Orca — вход</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-page">
+<main class="login">
+  <h1>Orca</h1>
+  <form method="post" action="/login">
+    <input type="text" name="username" value="orca" autocomplete="username" hidden>
+    <label for="token">Токен доступа</label>
+    <input type="password" id="token" name="token" autocomplete="current-password" required autofocus>
+    <!--ERR-->
+    <button type="submit" class="btn primary">Войти</button>
+    <p class="hint">Токен задан в WEB_TOKEN в настройках бота.</p>
+  </form>
+</main>
+</body>
+</html>

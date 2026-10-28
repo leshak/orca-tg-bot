@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="light dark">
+<title>Orca</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<div class="app" id="app" data-view="list">
+  <aside class="side">
+    <header class="bar">
+      <h1>Orca</h1>
+      <span id="conn" class="conn" data-state="off" title="Связь с сервером"></span>
+      <span id="summary" class="summary"></span>
+      <form method="post" action="/logout" class="logout">
+        <button type="submit" class="link">Выйти</button>
+      </form>
+    </header>
+    <div id="down" class="down"></div>
+    <nav id="projects" class="projects" aria-label="Проекты"></nav>
+  </aside>
+
+  <main class="main">
+    <p id="empty" class="empty">Выберите воркспейс слева</p>
+    <section id="ws" class="ws" hidden>
+      <header class="ws-head">
+        <button type="button" id="back" class="back" aria-label="К проектам">‹</button>
+        <div class="ws-title">
+          <h2 id="ws-name"></h2>
+          <div id="ws-meta" class="meta"></div>
+        </div>
+        <button type="button" id="add-agent" class="btn">+ Агент</button>
+      </header>
+
+      <details id="ws-msg" class="msg" hidden>
+        <summary id="ws-msg-head"></summary>
+        <div id="ws-msg-body" class="msg-body"></div>
+      </details>
+
+      <div class="tabs-row">
+        <div id="tabs" class="tabs" role="tablist" aria-label="Терминалы"></div>
+        <label class="compact"><input type="checkbox" id="compact"> Компактно</label>
+      </div>
+
+      <div id="screen-wrap" class="screen-wrap">
+        <pre id="screen" class="screen" tabindex="0" aria-label="Экран терминала"></pre>
+      </div>
+
+      <div class="keys" id="keys" aria-label="Клавиши">
+        <button type="button" data-key="esc">Esc</button>
+        <button type="button" data-key="up" aria-label="Вверх">↑</button>
+        <button type="button" data-key="down" aria-label="Вниз">↓</button>
+        <button type="button" data-key="enter" aria-label="Enter">⏎</button>
+        <button type="button" data-key="tab">Tab</button>
+        <button type="button" data-key="shift-tab">⇧Tab</button>
+        <button type="button" data-key="1">1</button>
+        <button type="button" data-key="2">2</button>
+        <button type="button" data-key="3">3</button>
+        <button type="button" data-key="ctrl-c" class="stop">⏹ Стоп</button>
+      </div>
+
+      <form id="composer" class="composer">
+        <label for="msg" class="vh">Сообщение агенту</label>
+        <textarea id="msg" rows="1" placeholder="Сообщение агенту…" enterkeyhint="send" autocomplete="off"></textarea>
+        <button type="submit" class="send" aria-label="Отправить">➤</button>
+      </form>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<dialog id="dlg-agent" aria-labelledby="dlg-agent-title">
+  <form id="form-agent">
+    <h3 id="dlg-agent-title">Ещё один агент</h3>
+    <p class="hint" id="dlg-agent-where"></p>
+    <label for="agent-type">Агент</label>
+    <select id="agent-type" name="agent"></select>
+    <label for="agent-prompt">Задача <span class="hint">(необязательно)</span></label>
+    <textarea id="agent-prompt" name="prompt" rows="4"></textarea>
+    <p class="err" id="agent-err"></p>
+    <div class="actions">
+      <button type="button" class="btn" data-close autofocus>Отмена</button>
+      <button type="submit" class="btn primary">Запустить</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-wt" aria-labelledby="dlg-wt-title">
+  <form id="form-wt">
+    <h3 id="dlg-wt-title">Новый воркtree</h3>
+    <div id="wt-repo-row">
+      <label for="wt-repo">Где</label>
+      <select id="wt-repo" name="repo"></select>
+    </div>
+    <label for="wt-name">Ветка</label>
+    <input id="wt-name" name="name" required pattern="[^\s\-]\S*" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="fix-login" autofocus>
+    <label for="wt-agent">Агент</label>
+    <select id="wt-agent" name="agent"></select>
+    <label for="wt-prompt">Задача <span class="hint">(необязательно)</span></label>
+    <textarea id="wt-prompt" name="prompt" rows="4"></textarea>
+    <p class="err" id="wt-err"></p>
+    <div class="actions">
+      <button type="button" class="btn" data-close>Отмена</button>
+      <button type="submit" class="btn primary">Создать</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>

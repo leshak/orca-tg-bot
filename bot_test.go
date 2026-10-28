@@ -51,6 +51,13 @@ EOF
 "host list")
   echo '{"id":"8","ok":true,"result":{"hosts":[{"kind":"local","name":"mac-mini","id":"local","selector":"local"},{"kind":"ssh","name":"linux-box","id":"tgt-1","selector":"ssh:tgt-1","connected":true}]},"_meta":{"runtimeId":"r"}}'
   ;;
+"project list")
+  if [ -n "$remote" ]; then
+    echo '{"id":"pr","ok":false,"error":{"code":"unknown_command","message":"old host"}}'
+    exit 1
+  fi
+  echo '{"id":"p","ok":true,"result":{"projects":[{"id":"github:me/app","displayName":"App Project","kind":"git","sourceRepoIds":["repo1"]},{"id":"github:me/empty","displayName":"Empty","kind":"git","sourceRepoIds":["repo2"]}]},"_meta":{"runtimeId":"r"}}'
+  ;;
 "terminal read")
   echo '{"id":"3","ok":true,"result":{"terminal":{"handle":"term-agent","status":"running","tail":["> hello","  ⎿ ok <b>","",""],"truncated":false,"nextCursor":null,"source":"screen"}},"_meta":{"runtimeId":"r"}}'
   ;;
