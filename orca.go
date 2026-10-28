@@ -221,6 +221,22 @@ type Repo struct {
 	EnvName string `json:"-"`
 }
 
+// Project — проект из боковой панели Orca (`project list`). Объединяет репозитории
+// (sourceRepoIds) — в том числе один и тот же проект на разных машинах.
+type Project struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	BadgeColor  string `json:"badgeColor"`
+	RepoIcon    *struct {
+		Type string `json:"type"`
+		Src  string `json:"src"`
+	} `json:"repoIcon"`
+	Kind          string   `json:"kind"`
+	SourceRepoIDs []string `json:"sourceRepoIds"`
+
+	Env string `json:"-"`
+}
+
 // ---- Рантаймы ----
 
 // Targets возвращает рантаймы, которые нужно опрашивать.
@@ -440,6 +456,23 @@ func (o *Orca) Send(ctx context.Context, env, handle, text string) error {
 // Interrupt посылает прерывание (как Ctrl+C) в терминал.
 func (o *Orca) Interrupt(ctx context.Context, env, handle string) error {
 	return o.run(ctx, env, nil, "terminal", "send", "--terminal", handle, "--interrupt")
+}
+
+// SendKeys пишет байты в терминал как есть, без Enter: Esc, стрелки, цифры меню.
+func (o *Orca) SendKeys(ctx context.Context, env, handle, raw string) error {
+	return o.run(ctx, env, nil, "terminal", "send", "--terminal", handle, "--text", raw)
+}
+
+// Projects — проекты рантайма из `project list`.
+func (o *Orca) Projects(ctx context.Context, env string) ([]Project, error) {
+	var r struct {
+		Projects []Project `json:"projects"`
+	}
+	err := o.run(ctx, env, &r, "project", "list")
+	for i := range r.Projects {
+		r.Projects[i].Env = env
+	}
+	return r.Projects, err
 }
 
 // Hosts возвращает машины локального рантайма: эту и её SSH-цели.
